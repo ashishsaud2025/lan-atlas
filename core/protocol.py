@@ -17,7 +17,8 @@ IO_TIMEOUT = 5.0
 MESSAGE_TYPES = {"ECHO", "ECHO_REPLY", "CHAT", "ACK", "ERROR", "FILE_OFFER",
                  "FILE_ACCEPT", "FILE_DECLINE", "FILE_CHUNK", "FILE_DONE",
                  "FILE_RESULT", "POST_QUERY", "POST_PAGE",
-                 "DIR_QUERY", "DIR_PAGE"}
+                 "DIR_QUERY", "DIR_PAGE",
+                 "RV_ANNOUNCE", "RV_QUERY", "RV_PAGE"}
 DIR_PAGE_LIMIT_MAX = 50
 
 
@@ -126,7 +127,8 @@ def validate_envelope(message: dict[str, Any]) -> None:
     body = message.get("body")
     if not isinstance(body, dict):
         raise ProtocolError("body must be an object")
-    if message["type"] in {"ECHO_REPLY", "ACK", "ERROR", "POST_PAGE", "DIR_PAGE"}:
+    if message["type"] in {"ECHO_REPLY", "ACK", "ERROR", "POST_PAGE", "DIR_PAGE",
+                             "RV_PAGE"}:
         try:
             UUID(message.get("reply_to", ""))
         except (ValueError, TypeError, AttributeError) as error:
@@ -244,6 +246,54 @@ def validate_envelope(message: dict[str, Any]) -> None:
             raise ProtocolError("empty directory page must be complete")
         if not body["complete"] and next_cursor is None:
             raise ProtocolError("incomplete directory page requires next cursor")
+    if message["type"] == "RV_ANNOUNCE":
+        from core.rendezvous import check_announcement
+        entry = body.get("entry")
+        if entry is None:
+            raise ProtocolError("rendezvous announcement requires entry")
+        try:
+            check_announcement(entry)
+        except ValueError as error:
+            raise ProtocolError(f"invalid rendezvous entry: {error}") from error
+    if message["type"] == "RV_QUERY":
+        try:
+            cursor = body.get("cursor")
+            if cursor is not None:
+                if not isinstance(cursor, dict):
+                    raise ValueError("cursor must be an object or null")
+                last = cursor.get("last_peer")
+                if not isinstance(last, str) or str(UUID(last)) != last:
+                    raise ValueError("invalid cursor last_peer")
+            if type(body.get("limit")) is not int or not 1 <= body["limit"] <= 50:
+                raise ValueError("limit must be 1 to 50")
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ProtocolError(f"invalid rendezvous query: {error}") from error
+    if message["type"] == "RV_PAGE":
+        from core.rendezvous import check_announcement as check_rv
+        entries = body.get("entries")
+        if not isinstance(entries, list) or len(entries) > 50:
+            raise ProtocolError("rendezvous page must list at most 50 entries")
+        try:
+            for raw in entries:
+                check_rv(raw)
+        except ValueError as error:
+            raise ProtocolError(f"invalid entry in rendezvous page: {error}") from error
+        try:
+            next_cursor = body.get("next_cursor")
+            if next_cursor is not None:
+                if not isinstance(next_cursor, dict):
+                    raise ValueError("cursor must be an object or null")
+                last = next_cursor.get("last_peer")
+                if not isinstance(last, str) or str(UUID(last)) != last:
+                    raise ValueError("invalid cursor last_peer")
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ProtocolError("invalid rendezvous next cursor") from error
+        if type(body.get("complete")) is not bool:
+            raise ProtocolError("rendezvous page requires complete flag")
+        if not entries and not body["complete"]:
+            raise ProtocolError("empty rendezvous page must be complete")
+        if not body["complete"] and next_cursor is None:
+            raise ProtocolError("incomplete rendezvous page requires next cursor")
 
 
 def envelope(kind: str, peer_id: str, session_id: str, body: dict[str, Any],

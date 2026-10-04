@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
         self.active_probe_id: str | None = None
         self.inventory_request_id: str | None = None
         self._next_presence_refresh = 0.0
+        self._rv_registered = False
         self.peer_model = PeerListModel()
         self.peer_table_model = PeerTableModel()
         self.message_model = MessageListModel()
@@ -1445,6 +1446,49 @@ class MainWindow(QMainWindow):
         internet_actions.addWidget(self.internet_remove)
         internet_actions.addStretch(1)
         internet_layout.addLayout(internet_actions)
+        rv_form = QGridLayout()
+        rv_form.addWidget(QLabel("Rendezvous server"), 0, 0)
+        self.rv_host = QLineEdit()
+        self.rv_host.setMaxLength(255)
+        self.rv_host.setPlaceholderText("Rendezvous host (untrusted directory)")
+        rv_form.addWidget(self.rv_host, 0, 1)
+        rv_form.addWidget(QLabel("Server port"), 1, 0)
+        self.rv_port = QSpinBox()
+        self.rv_port.setRange(1, 65535)
+        self.rv_port.setValue(50004)
+        rv_form.addWidget(self.rv_port, 1, 1)
+        rv_form.addWidget(QLabel("Announced secure port"), 2, 0)
+        self.rv_secure_port = QSpinBox()
+        self.rv_secure_port.setRange(1, 65535)
+        announced_secure = self.service.hello.secure_port or 50003
+        self.rv_secure_port.setValue(announced_secure)
+        rv_form.addWidget(self.rv_secure_port, 2, 1)
+        internet_layout.addLayout(rv_form)
+        self.rv_results = QListWidget()
+        self.rv_results.setAccessibleName("Rendezvous lookup results")
+        self.rv_results.setMaximumHeight(90)
+        internet_layout.addWidget(self.rv_results)
+        rv_actions = QHBoxLayout()
+        self.rv_register = action_button(
+            "Register", self._toggle_rendezvous, True)
+        self.rv_lookup = action_button(
+            "Look up peers", self._lookup_rendezvous)
+        self.rv_add_result = action_button(
+            "Add selected result", self._add_rendezvous_result)
+        for button in (self.rv_register, self.rv_lookup,
+                       self.rv_add_result):
+            rv_actions.addWidget(button)
+        rv_actions.addStretch(1)
+        internet_layout.addLayout(rv_actions)
+        rv_note = QLabel(
+            "Register announces the address above, signed by this device, "
+            "every two minutes over plaintext TCP framing. Eavesdroppers see "
+            "contact details plus certificates. The server is untrusted: "
+            "entries are verified against paired keys before display, and "
+            "pairing still needs the LAN or a verified second channel.")
+        rv_note.setObjectName("PageSubtitle")
+        rv_note.setWordWrap(True)
+        internet_layout.addWidget(rv_note)
         layout.addWidget(internet)
         self._refresh_internet_list()
         publications = QFrame()
@@ -2579,16 +2623,106 @@ class MainWindow(QMainWindow):
             return
         host = self.internet_host.text().strip()
         label = self.internet_label.text().strip() or record.hello.name
+        self._add_internet_entry(peer_id, label, host,
+                                 self.internet_port.value(),
+                                 record.hello.capabilities,
+                                 trust.fingerprint)
+
+    def _add_internet_entry(self, peer_id: str, label: str, host: str,
+                            port: int, capabilities: tuple[str, ...],
+                            fingerprint: str) -> None:
+        """Persist one dial entry and refresh every peer surface."""
         try:
             self.service.address_book.add(
-                peer_id, label, host, self.internet_port.value(),
-                record.hello.capabilities, trust.fingerprint)
+                peer_id, label, host, port, capabilities, fingerprint)
         except ValueError as error:
             self.append(f"Entry rejected: {error}", "Network", "warning")
             return
         self._refresh_internet_list()
         self._update_peer_records(self.peer_records)
         self.append(f"Internet entry {label!r} added.", "Network")
+
+    @Slot()
+    def _toggle_rendezvous(self) -> None:
+        """Publish or withdraw this session's signed rendezvous entry."""
+        if self._rv_registered:
+            self.service.rendezvous_stop()
+            self._rv_registered = False
+            self.rv_register.setText("Register")
+            self.append("Rendezvous registration withdrawn.", "Network")
+            return
+        server = self.rv_host.text().strip()
+        ext_host = self.internet_host.text().strip()
+        if not server or not ext_host:
+            self.append("Enter a rendezvous server and the address to announce.",
+                        "Network", "warning")
+            return
+        try:
+            self.service.rendezvous_register(
+                server, self.rv_port.value(), ext_host,
+                self.internet_port.value(), self.rv_secure_port.value())
+        except (ValueError, RuntimeError) as error:
+            self.append(f"Registration failed: {error}", "Network", "warning")
+            return
+        self._rv_registered = True
+        self.rv_register.setText("Withdraw")
+        self.append(f"Announcing {ext_host} to rendezvous {server}.",
+                    "Network")
+
+    @Slot()
+    def _lookup_rendezvous(self) -> None:
+        """Fetch one rendezvous page with per-entry trust verification."""
+        server = self.rv_host.text().strip()
+        if not server:
+            self.append("Enter a rendezvous server before looking up peers.",
+                        "Network", "warning")
+            return
+        try:
+            results = self.service.rendezvous_lookup(
+                server, self.rv_port.value())
+        except (ValueError, RuntimeError) as error:
+            self.append(f"Lookup failed: {error}", "Network", "warning")
+            return
+        self.rv_results.clear()
+        for entry, trusted in results:
+            state = "Verified paired peer" if trusted else "Unverified hint"
+            item = QListWidgetItem(
+                f"{entry.get('name')} · {entry.get('host')}:"
+                f"{entry.get('secure_port')} · {state}")
+            item.setData(Qt.ItemDataRole.UserRole, (entry, trusted))
+            self.rv_results.addItem(item)
+        self.append(f"Rendezvous lookup returned {len(results)} entries.",
+                    "Network")
+
+    @Slot()
+    def _add_rendezvous_result(self) -> None:
+        """Add one verified lookup result as a dial entry."""
+        item = self.rv_results.currentItem()
+        data = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(data, tuple) or len(data) != 2:
+            return
+        entry, trusted = data
+        if not trusted:
+            self.append("Result is unverified; pair on LAN first.",
+                        "Network", "warning")
+            return
+        from core.rendezvous import verify_announcement
+        transport = self.service.secure_transport
+        record = (transport.trust_store.get(entry["peer_id"])
+                  if transport is not None else None)
+        try:
+            fresh, _reason = verify_announcement(
+                entry, record.fingerprint if record is not None else None)
+        except (ValueError, TypeError, AttributeError):
+            fresh = False
+        if not fresh or record is None:
+            self.append("Result no longer verifies; look up again.",
+                        "Network", "warning")
+            return
+        self._add_internet_entry(
+            entry["peer_id"], str(entry.get("name") or "Peer"),
+            str(entry["host"]), int(entry["secure_port"]),
+            tuple(entry.get("capabilities") or ()), record.fingerprint)
 
     @Slot()
     def _remove_internet_peer(self) -> None:

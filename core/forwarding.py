@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv6Address, ip_address
 import logging
+import select
 import socket
 import threading
 import time
@@ -18,6 +19,7 @@ MAX_CONNECTIONS = 8
 CONNECT_TIMEOUT = 3.0
 IO_TIMEOUT = 60.0
 ACCEPT_TIMEOUT = 0.5
+PIPE_POLL = 0.5
 
 
 @dataclass(frozen=True)
@@ -176,8 +178,12 @@ class ForwardingService:
                             or self._stop.is_set())
                     if not full:
                         generation = self._generation
+                        target_host = self._state.target_host
+                        target_port = self._state.target_port
                         relay = threading.Thread(
-                            target=self._relay, args=(client, generation),
+                            target=self._relay,
+                            args=(client, generation, target_host,
+                                  target_port),
                             name="lan-atlas-relay", daemon=True)
                         self._relays.append(relay)
                         self._state = ForwardingState(
@@ -231,13 +237,16 @@ class ForwardingService:
                 finished = self._state
             self._notify("forwarding_stopped", finished)
 
-    def _relay(self, client: socket.socket, generation: int) -> None:
-        with self._lock:
-            target_host = self._state.target_host
-            target_port = self._state.target_port
+    def _relay(self, client: socket.socket, generation: int,
+               target_host: str, target_port: int | None) -> None:
         upstream: socket.socket | None = None
         try:
-            assert target_port is not None
+            if target_port is None:
+                try:
+                    client.close()
+                except OSError:
+                    logger.debug("Could not close orphaned client", exc_info=True)
+                return
             try:
                 upstream = socket.create_connection(
                     (target_host, target_port), timeout=CONNECT_TIMEOUT)
@@ -249,6 +258,13 @@ class ForwardingService:
             with self._lock:
                 self._relay_sockets.add(client)
                 self._relay_sockets.add(upstream)
+                stopped = self._stop.is_set()
+            if stopped:
+                for sock in (client, upstream):
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        logger.debug("Could not interrupt late relay", exc_info=True)
             first = threading.Thread(
                 target=self._pipe, args=(client, upstream, generation),
                 daemon=True)
@@ -284,6 +300,12 @@ class ForwardingService:
               generation: int) -> None:
         try:
             while not self._stop.is_set():
+                try:
+                    ready, _, _ = select.select([source], [], [], PIPE_POLL)
+                except (OSError, ValueError):
+                    break
+                if not ready:
+                    continue
                 try:
                     chunk = source.recv(CHUNK_SIZE)
                 except TimeoutError:

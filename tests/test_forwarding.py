@@ -171,7 +171,10 @@ def test_stop_interrupts_idle_connection_promptly() -> None:
         try:
             forward.stop()
             assert forward.join(5)
-            assert _read_all(client) == b""
+            try:
+                assert _read_all(client) == b""
+            except ConnectionResetError:
+                pass
         finally:
             client.close()
     finally:

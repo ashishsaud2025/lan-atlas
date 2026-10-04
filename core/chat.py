@@ -96,6 +96,9 @@ class ChatService:
         self.remote_catalog = RemoteDirectoryCache()
         self._directory_cursors: dict[str, dict[str, Any] | None] = {}
         self._dial_cache: dict[str, tuple[str, str, float]] = {}
+        self._rv_config: tuple[str, int, str, int, int] | None = None
+        self._rv_config_lock = threading.Lock()
+        self._rv_thread: threading.Thread | None = None
         if isinstance(address_book, AddressBook):
             self.address_book = address_book
             self._book_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -255,6 +258,107 @@ class ChatService:
     def _drop_dial_cache(self, peer_id: str) -> None:
         """Forget one probed session so the next dial re-resolves it."""
         self._dial_cache.pop(peer_id, None)
+
+    def rendezvous_register(self, server_host: str, server_port: int,
+                            ext_host: str, ext_tcp_port: int,
+                            ext_secure_port: int) -> bool:
+        """Publish this session to a rendezvous server every two minutes."""
+        if self.secure_transport is None:
+            raise RuntimeError("secure transport is not configured")
+        if self._stop.is_set():
+            raise RuntimeError("service is stopping")
+        from core.rendezvous import sign_announcement
+        try:
+            sign_announcement(
+                self.secure_transport.identity, self.hello.session_id,
+                self.hello.name, ext_host, ext_tcp_port, ext_secure_port,
+                list(self.hello.capabilities))
+        except ValueError as error:
+            raise ValueError(f"announced endpoint invalid: {error}") from error
+        with self._rv_config_lock:
+            self._rv_config = (server_host, server_port, ext_host,
+                               ext_tcp_port, ext_secure_port)
+            if self._rv_thread is not None and not self._rv_thread.is_alive():
+                self._threads = [thread for thread in self._threads
+                                 if thread is not self._rv_thread]
+                self._rv_thread = None
+            live = self._rv_thread is not None and self._rv_thread.is_alive()
+            if not live:
+                self._rv_thread = threading.Thread(
+                    target=self._rendezvous_worker, daemon=True)
+                self._threads.append(self._rv_thread)
+                self._rv_thread.start()
+            return True
+
+    def rendezvous_stop(self) -> None:
+        """Withdraw from rendezvous announcements without joining."""
+        with self._rv_config_lock:
+            self._rv_config = None
+
+    def rendezvous_lookup(self, server_host: str, server_port: int
+                          ) -> list[tuple[dict[str, Any], bool]]:
+        """Fetch bounded rendezvous pages with trust verification per entry."""
+        from core.rendezvous import query_all, verify_announcement
+        from core.identity import validate_certificate
+        import base64
+        if self.secure_transport is None:
+            raise RuntimeError("secure transport is not configured")
+        trust = self.secure_transport.trust_store
+        try:
+            entries = query_all(server_host, server_port,
+                                self.hello.peer_id, self.hello.session_id)
+        except (OSError, ProtocolError, ValueError) as error:
+            raise RuntimeError(f"lookup failed: {error}") from error
+        results = []
+        for raw in entries:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                valid, _reason = verify_announcement(raw, None)
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if not valid:
+                continue
+            try:
+                actual = validate_certificate(
+                    base64.b64decode(raw["certificate"]),
+                    raw["peer_id"])
+            except (ValueError, TypeError, AttributeError):
+                continue
+            record = trust.get(raw["peer_id"])
+            trusted = (record is not None
+                       and record.fingerprint == actual)
+            results.append((raw, trusted))
+        return results
+
+    def _rendezvous_worker(self) -> None:
+        from core.rendezvous import announce_once, sign_announcement
+        while not self._stop.is_set():
+            with self._rv_config_lock:
+                config = self._rv_config
+            if config is None:
+                break
+            server_host, server_port, ext_host, ext_tcp, ext_secure = config
+            transport = self.secure_transport
+            try:
+                if transport is None:
+                    raise RuntimeError("secure transport is not configured")
+                entry = sign_announcement(
+                    transport.identity, self.hello.session_id,
+                    self.hello.name, ext_host, ext_tcp, ext_secure,
+                    list(self.hello.capabilities))
+                announce_once(server_host, server_port, entry,
+                              self.hello.peer_id, self.hello.session_id)
+            except (OSError, ProtocolError, ValueError,
+                    RuntimeError) as error:
+                self._event("status", f"Rendezvous announce failed: {error}")
+            for _ in range(240):
+                if self._stop.is_set():
+                    break
+                with self._rv_config_lock:
+                    if self._rv_config is None:
+                        break
+                self._stop.wait(0.5)
 
     def request_pair(self, peer: Peer) -> bool:
         """Queue one pairing request without blocking the caller."""

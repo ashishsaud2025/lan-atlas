@@ -18,7 +18,8 @@ MESSAGE_TYPES = {"ECHO", "ECHO_REPLY", "CHAT", "ACK", "ERROR", "FILE_OFFER",
                  "FILE_ACCEPT", "FILE_DECLINE", "FILE_CHUNK", "FILE_DONE",
                  "FILE_RESULT", "POST_QUERY", "POST_PAGE",
                  "DIR_QUERY", "DIR_PAGE",
-                 "RV_ANNOUNCE", "RV_QUERY", "RV_PAGE"}
+                 "RV_ANNOUNCE", "RV_QUERY", "RV_PAGE",
+                 "RELAY_ALLOC", "RELAY_JOIN", "RELAY_READY"}
 DIR_PAGE_LIMIT_MAX = 50
 
 
@@ -294,6 +295,17 @@ def validate_envelope(message: dict[str, Any]) -> None:
             raise ProtocolError("empty rendezvous page must be complete")
         if not body["complete"] and next_cursor is None:
             raise ProtocolError("incomplete rendezvous page requires next cursor")
+    if message["type"] == "RELAY_ALLOC":
+        if body != {}:
+            raise ProtocolError("relay allocation takes no arguments")
+    if message["type"] == "RELAY_JOIN":
+        token = body.get("token")
+        if (not isinstance(token, str) or len(token) != 32
+                or any(c not in "0123456789abcdef" for c in token)):
+            raise ProtocolError("relay join requires a 32 hex token")
+    if message["type"] == "RELAY_READY":
+        if body != {}:
+            raise ProtocolError("relay ready takes no arguments")
 
 
 def envelope(kind: str, peer_id: str, session_id: str, body: dict[str, Any],

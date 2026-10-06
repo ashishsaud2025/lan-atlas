@@ -260,6 +260,133 @@ class ChatService:
         """Forget one probed session so the next dial re-resolves it."""
         self._dial_cache.pop(peer_id, None)
 
+    def relay_reserve(self, host: str, port: int) -> str:
+        """Hold one relay allocation and serve a single inbound DM."""
+        if self.secure_transport is None:
+            raise RuntimeError("secure transport is not configured")
+        from core.relay import reserve
+        try:
+            sock, token = reserve(host, port, self.hello.peer_id,
+                                  self.hello.session_id)
+        except (OSError, ProtocolError, ValueError) as error:
+            raise RuntimeError(f"relay reservation failed: {error}") from error
+        worker = threading.Thread(
+            target=self._relay_host_worker, args=(sock, token), daemon=True)
+        worker.start()
+        return token
+
+    def _relay_host_worker(self, sock: socket.socket, token: str) -> None:
+        """Wait for one join, then accept a single authenticated DM."""
+        del token
+        deadline = time.monotonic() + 150.0
+        try:
+            while not self._stop.is_set() and time.monotonic() < deadline:
+                try:
+                    message = recv_message(sock, timeout=5.0)
+                except TimeoutError:
+                    continue
+                if message is None:
+                    return
+                validate_envelope(message)
+                if message["type"] != "RELAY_READY":
+                    raise ProtocolError("expected relay ready before traffic")
+                break
+            else:
+                return
+            transport = self.secure_transport
+            if transport is None or self._stop.is_set():
+                return
+            try:
+                channel = transport.accept(sock, allow_pairing=False)
+            except (OSError, SecureTransportError, ValueError) as error:
+                self._event("status", f"Relay handshake failed: {error}")
+                return
+            if channel is None:
+                self._event("status", "Relay pairing refused over relay")
+                return
+            try:
+                self._dispatch_inbound(channel.socket, True,
+                                       channel.peer_id, channel.session_id)
+            except (OSError, ValueError) as error:
+                self._event("status", f"Relay inbound ended: {error}")
+            finally:
+                try:
+                    channel.socket.close()
+                except OSError as error:
+                    logging.debug("Relay close raced worker: %s", error)
+        except (OSError, ProtocolError, ValueError) as error:
+            self._event("status", f"Relay reservation ended: {error}")
+        finally:
+            try:
+                sock.close()
+            except OSError as error:
+                logging.debug("Relay socket close raced worker: %s", error)
+
+    def relay_send(self, peer_id: str, relay_host: str, relay_port: int,
+                   token: str, text: str) -> str:
+        """Send one DM through a relay without touching direct routes."""
+        if self.secure_transport is None:
+            raise RuntimeError("secure transport is not configured")
+        entry = self.address_book.get(peer_id)
+        if entry is None:
+            raise ValueError("no address book entry for peer")
+        trust = self.secure_transport.trust_store
+        record = trust.get(entry.peer_id)
+        if record is None:
+            raise ValueError("entry peer is not paired; pair on LAN first")
+        if record.fingerprint != entry.fingerprint:
+            raise ValueError("entry certificate differs from paired key")
+        from core.relay import join as relay_join
+        from core.protocol import recv_message as _recv
+        try:
+            sock = relay_join(relay_host, relay_port, self.hello.peer_id,
+                              self.hello.session_id, token)
+        except (OSError, ProtocolError, ValueError) as error:
+            raise RuntimeError(f"relay join failed: {error}") from error
+        placeholder = Hello(entry.peer_id, str(uuid4()), entry.label,
+                            entry.port, entry.capabilities, entry.port,
+                            entry.fingerprint)
+        try:
+            channel = self.secure_transport.connect_over(
+                sock, Peer(placeholder, entry.host, time.monotonic()),
+                expect_session=False)
+        except (OSError, SecureTransportError, ValueError) as error:
+            raise RuntimeError(f"relay handshake failed: {error}") from error
+        body = {"scope": "dm", "text": text, "to_session": channel.session_id}
+        message = envelope("CHAT", self.hello.peer_id, self.hello.session_id,
+                           body)
+        channel_hello = Hello(channel.peer_id, channel.session_id,
+                              entry.label, entry.port, entry.capabilities,
+                              entry.port, channel.fingerprint)
+        self.message_journal.record_outgoing(
+            message, self.hello,
+            (Peer(channel_hello, entry.host, time.monotonic()),))
+        try:
+            with channel.socket:
+                send_message(channel.socket, message)
+                reply = _recv(channel.socket)
+                if reply is None:
+                    raise ProtocolError("no acknowledgement")
+                validate_envelope(reply)
+                if (reply["type"] != "ACK"
+                        or reply["reply_to"] != message["message_id"]
+                        or reply["session_id"] != channel.session_id
+                        or reply["peer_id"] != channel.peer_id
+                        or reply["body"].get("status") != "accepted"):
+                    raise ProtocolError("invalid acknowledgement")
+        except (OSError, SecureTransportError, ValueError) as error:
+            self.message_journal.update_delivery(
+                message["message_id"], channel.session_id, "uncertain",
+                str(error))
+            self._event("status", f"Failed {message['message_id']} via relay: "
+                        f"{error}")
+            raise RuntimeError(f"relay send failed: {error}") from error
+        self.message_journal.update_delivery(
+            message["message_id"], channel.session_id, "accepted",
+            "accepted by receiving application via relay", True)
+        self._event("status", f"Accepted {message['message_id']} via relay")
+        return message["message_id"]
+
     def rendezvous_register(self, server_host: str, server_port: int,
                             ext_host: str, ext_tcp_port: int,
                             ext_secure_port: int) -> bool:

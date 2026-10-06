@@ -13,7 +13,7 @@ import ssl
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from uuid import UUID, uuid4
 
 from core.discovery import Hello
@@ -26,7 +26,7 @@ from core.identity import (
 from core.protocol import ProtocolError, recv_message, send_message
 from core.roster import Peer
 from core.scope import resolve_host
-from core.trust import KeyChangedError, TrustStore
+from core.trust import KeyChangedError, TrustRecord, TrustStore
 
 SECURE_PORT = 50003
 SECURITY_VERSION = 1
@@ -128,6 +128,51 @@ class SecureTransport:
             tls_socket = self._client_context.wrap_socket(
                 raw_socket, server_hostname=None, do_handshake_on_connect=False)
             raw_socket = None
+            return self._finish_client_handshake(tls_socket, hello, record)
+        except SecureTransportError:
+            self._observe_socket(tls_socket, False)
+            _close_sockets(tls_socket, raw_socket)
+            raise
+        except (OSError, ssl.SSLError, ProtocolError, TimeoutError,
+                IdentityError, ValueError) as error:
+            self._observe_socket(tls_socket, False)
+            _close_sockets(tls_socket, raw_socket)
+            raise SecureTransportError("secure connection failed") from error
+
+    def connect_over(self, raw_socket: socket.socket, peer: Peer,
+                     expect_session: bool = True) -> SecureChannel:
+        """Run the paired TLS handshake over an already open socket."""
+        hello = _validate_peer(peer)
+        if type(expect_session) is not bool:
+            raise ValueError("expect_session must be bool")
+        record = self.trust_store.get(hello.peer_id)
+        if record is None:
+            raise SecureTransportError("peer is not paired")
+        if record.fingerprint != hello.certificate_sha256:
+            raise SecureTransportError("advertised certificate differs from trust")
+        tls_socket: ssl.SSLSocket | None = None
+        try:
+            raw_socket.settimeout(HANDSHAKE_TIMEOUT)
+            tls_socket = self._client_context.wrap_socket(
+                raw_socket, server_hostname=None, do_handshake_on_connect=False)
+            raw_socket = None
+            return self._finish_client_handshake(
+                tls_socket, hello, record, expect_session)
+        except SecureTransportError:
+            self._observe_socket(tls_socket, False)
+            _close_sockets(tls_socket, raw_socket)
+            raise
+        except (OSError, ssl.SSLError, ProtocolError, TimeoutError,
+                IdentityError, ValueError) as error:
+            self._observe_socket(tls_socket, False)
+            _close_sockets(tls_socket, raw_socket)
+            raise SecureTransportError("secure relay failed") from error
+
+    def _finish_client_handshake(self, tls_socket: ssl.SSLSocket,
+                                 hello: Hello, record: TrustRecord,
+                                 expect_session: bool = True) -> SecureChannel:
+        """Authenticate both ends over one wrapped TLS socket."""
+        try:
             self._observe_socket(tls_socket, True)
             tls_socket.do_handshake()
             certificate_der = _peer_certificate(tls_socket)
@@ -138,7 +183,9 @@ class SecureTransport:
                     or not self.trust_store.verify(
                         hello.peer_id, certificate_der)):
                 raise SecureTransportError("TLS certificate does not match trust")
-            challenge = _receive_challenge(tls_socket, hello)
+            challenge = _receive_challenge(tls_socket, hello, expect_session)
+            live_session = (_canonical_uuid(challenge["session_id"], "session_id")
+                            if not expect_session else hello.session_id)
             signature = self.identity.sign(_authentication_transcript(
                 challenge["nonce"], challenge["fingerprint"],
                 self.local_hello.peer_id, self.local_hello.session_id,
@@ -152,19 +199,19 @@ class SecureTransport:
                 "signature": _encode_base64(signature),
             }, timeout=IO_TIMEOUT)
             ready = _receive_frame(tls_socket)
-            _validate_ready(ready, hello)
+            _validate_ready(ready, replace(hello, session_id=live_session))
             tls_socket.settimeout(IO_TIMEOUT)
-            return SecureChannel(tls_socket, hello.peer_id, hello.session_id,
+            return SecureChannel(tls_socket, hello.peer_id, live_session,
                                  fingerprint)
         except SecureTransportError:
             self._observe_socket(tls_socket, False)
-            _close_sockets(tls_socket, raw_socket)
+            tls_socket.close()
             raise
         except (OSError, ssl.SSLError, ProtocolError, TimeoutError,
-                 IdentityError, ValueError) as error:
+                IdentityError, ValueError) as error:
             self._observe_socket(tls_socket, False)
-            _close_sockets(tls_socket, raw_socket)
-            raise SecureTransportError("secure connection failed") from error
+            tls_socket.close()
+            raise SecureTransportError("secure handshake failed") from error
 
     def probe_session(self, host: str, port: int,
                       peer_id: str) -> tuple[str, str]:
@@ -565,16 +612,16 @@ def _certificate_fingerprint(certificate_der: bytes, peer_id: str) -> str:
         raise SecureTransportError(str(error)) from error
 
 
-def _receive_challenge(tls_socket: ssl.SSLSocket,
-                       hello: Hello) -> dict[str, object]:
+def _receive_challenge(tls_socket: ssl.SSLSocket, hello: Hello,
+                       expect_session: bool = True) -> dict[str, object]:
     frame = _receive_frame(tls_socket)
     required = {"version", "type", "nonce", "peer_id",
                 "session_id", "fingerprint"}
     _require_frame(frame, "SECURE_CHALLENGE", required)
     _validate_nonce(frame["nonce"])
+    session_id = _canonical_uuid(frame["session_id"], "session_id")
     if (_canonical_uuid(frame["peer_id"], "peer_id") != hello.peer_id
-            or _canonical_uuid(frame["session_id"], "session_id")
-            != hello.session_id
+            or (expect_session and session_id != hello.session_id)
             or _validate_fingerprint(frame["fingerprint"])
             != hello.certificate_sha256):
         raise SecureTransportError("challenge differs from selected peer")

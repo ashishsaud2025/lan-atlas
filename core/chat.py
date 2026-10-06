@@ -56,7 +56,8 @@ class ChatService:
                  discovery_source_addresses: tuple[str, ...] | None = None,
                  discovery_include_fallback: bool = True,
                  directory: LocalServiceDirectory | None = None,
-                 address_book: AddressBook | Path | str | None = None) -> None:
+                 address_book: AddressBook | Path | str | None = None,
+                 remote_catalog: RemoteDirectoryCache | None = None) -> None:
         self.hello = hello
         encode_hello(hello)
         if (secure_transport is not None
@@ -93,7 +94,7 @@ class ChatService:
         self.directory = directory or LocalServiceDirectory(hello)
         if self.directory.owner is not hello:
             raise ValueError("directory must belong to the local session")
-        self.remote_catalog = RemoteDirectoryCache()
+        self.remote_catalog = remote_catalog or RemoteDirectoryCache()
         self._directory_cursors: dict[str, dict[str, Any] | None] = {}
         self._dial_cache: dict[str, tuple[str, str, float]] = {}
         self._rv_config: tuple[str, int, str, int, int] | None = None

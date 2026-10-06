@@ -16,7 +16,7 @@ from core.chat import ChatService
 from core.discovery import IPV6_CAPABILITY, Hello, ipv6_supported
 from core.identity import DeviceIdentity
 from core.secure_transport import SECURE_PORT, SecureTransport
-from core.services import LocalServiceDirectory
+from core.services import LocalServiceDirectory, RemoteDirectoryCache
 from core.storage import JsonLinesPostStore
 from core.trust import TrustStore
 from gui.main_window import MainWindow
@@ -77,6 +77,8 @@ def main() -> int:
     parser.add_argument("--addressbook-file", type=Path,
                         default=root / "lan-manager/addressbook.json")
     parser.add_argument("--post-file", type=Path, default=root / "lan-manager/posts.jsonl")
+    parser.add_argument("--catalog-file", type=Path,
+                        default=root / "lan-manager/remote-catalog.json")
     args = parser.parse_args()
     if args.discovery_auto and args.source_address:
         parser.error("--discovery-auto cannot be combined with --source-address")
@@ -110,7 +112,9 @@ def main() -> int:
                               discovery_source_addresses=sources,
                               discovery_include_fallback=fallback,
                               directory=LocalServiceDirectory(hello),
-                              address_book=args.addressbook_file)
+                              address_book=args.addressbook_file,
+                              remote_catalog=RemoteDirectoryCache(
+                                  args.catalog_file))
     except (ValueError, OSError) as error:
         logging.error("Startup failed: %s", error)
         return 1

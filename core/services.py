@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from ipaddress import IPv4Address, ip_address
+import json
+import os
+from pathlib import Path
+import tempfile
 import threading
 from urllib.parse import quote
 from uuid import UUID, uuid4
@@ -135,7 +139,8 @@ class RemoteDirectoryCache:
     """Bounded process lifetime cache of other sessions' publications."""
 
     def __init__(self, limit: int = CACHE_LIMIT,
-                 owner_limit: int = OWNER_LIMIT) -> None:
+                 owner_limit: int = OWNER_LIMIT,
+                 path: Path | str | None = None) -> None:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
             raise ValueError("cache limit must be a positive integer")
         if (not isinstance(owner_limit, int) or isinstance(owner_limit, bool)
@@ -143,8 +148,11 @@ class RemoteDirectoryCache:
             raise ValueError("owner limit must be a positive integer")
         self.limit = limit
         self.owner_limit = owner_limit
+        self.path = Path(path) if path is not None else None
         self._entries: dict[tuple[str, str], DirectoryEntry] = {}
         self._lock = threading.Lock()
+        if self.path is not None and self.path.exists():
+            self._entries = self._load()
 
     def merge(self, entries: list[dict[str, object]]) -> tuple[int, int]:
         """Validate and upsert one received page; return added and duplicate counts."""
@@ -168,6 +176,7 @@ class RemoteDirectoryCache:
                     del self._entries[owned[0]]
                 self._entries[key] = entry
                 added += 1
+            self._persist_locked()
             return added, duplicates
 
     def evict_owners(self, keep: set[str]) -> int:
@@ -176,7 +185,61 @@ class RemoteDirectoryCache:
             stale = [key for key in self._entries if key[0] not in keep]
             for key in stale:
                 del self._entries[key]
+            if stale:
+                self._persist_locked()
             return len(stale)
+
+    def _load(self) -> dict[tuple[str, str], DirectoryEntry]:
+        """Load persisted entries, failing loudly on corrupt documents."""
+        assert self.path is not None
+        try:
+            document = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError("catalog file is not valid UTF-8 JSON") from error
+        if not isinstance(document, dict):
+            raise ValueError("catalog file must contain an object")
+        if document.get("schema") != 1:
+            raise ValueError("unsupported catalog file schema")
+        if set(document) != {"schema", "entries"}:
+            raise ValueError("catalog file has invalid fields")
+        values = document.get("entries")
+        if not isinstance(values, list):
+            raise ValueError("catalog entries must be a list")
+        entries: dict[tuple[str, str], DirectoryEntry] = {}
+        for raw in values[:self.limit]:
+            entry = validate_directory_entry(raw)
+            entries[(entry.owner_peer_id, entry.service_id)] = entry
+        return entries
+
+    def _persist_locked(self) -> None:
+        """Atomically persist entries when a file backs this cache."""
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        document = {
+            "schema": 1,
+            "entries": [entry_dict(entry)
+                        for _, entry in sorted(self._entries.items())],
+        }
+        encoded = (json.dumps(document, ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":")) + "\n").encode("utf-8")
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent)
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, self.path)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
 
     def snapshot(self, kind: DirectoryKind | None = None) -> tuple[DirectoryEntry, ...]:
         """Return deterministic cached entries, optionally filtered by category."""

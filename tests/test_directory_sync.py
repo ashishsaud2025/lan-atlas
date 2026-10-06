@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -83,6 +84,42 @@ def test_merge_rejects_invalid_page_atomically() -> None:
     with pytest.raises(ValueError):
         merge_page(cache, [good, bad])
     assert cache.count() == 0
+
+
+def test_catalog_persists_across_restarts(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.json"
+    first = RemoteDirectoryCache(path=path)
+    owner = _owner()
+    assert merge_page(first, [_entry_data(owner.peer_id, owner.session_id,
+                                          "Kept")]) == (1, 0)
+    second = RemoteDirectoryCache(path=path)
+    assert second.count() == 1
+    assert second.snapshot()[0].name == "Kept"
+    assert second.evict_owners({"nobody"}) == 1
+    assert RemoteDirectoryCache(path=path).count() == 0
+
+
+def test_catalog_rejects_corrupt_files(tmp_path: Path) -> None:
+    broken = tmp_path / "broken.json"
+    broken.write_text("{bad", encoding="utf-8")
+    with pytest.raises(ValueError):
+        RemoteDirectoryCache(path=broken)
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text(json.dumps({"schema": 1, "entries": [{"bogus": 1}]}),
+                     encoding="utf-8")
+    with pytest.raises(ValueError):
+        RemoteDirectoryCache(path=wrong)
+
+
+def test_service_catalog_survives_restart(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.json"
+    first = ChatService(_hello("First"),
+                        remote_catalog=RemoteDirectoryCache(path=path))
+    owner = _owner()
+    first.remote_catalog.merge([_entry_data(owner.peer_id, owner.session_id)])
+    second = ChatService(_hello("Second"),
+                         remote_catalog=RemoteDirectoryCache(path=path))
+    assert second.remote_catalog.count() == 1
 
 
 def test_merge_upserts_republished_entries() -> None:

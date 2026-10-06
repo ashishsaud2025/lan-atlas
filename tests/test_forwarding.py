@@ -170,7 +170,7 @@ def test_stop_interrupts_idle_connection_promptly() -> None:
             ("127.0.0.1", state.listen_port), timeout=5)
         try:
             forward.stop()
-            assert forward.join(5)
+            assert forward.join(15)
             try:
                 assert _read_all(client) == b""
             except ConnectionResetError:

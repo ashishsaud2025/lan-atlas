@@ -1480,6 +1480,41 @@ class MainWindow(QMainWindow):
             rv_actions.addWidget(button)
         rv_actions.addStretch(1)
         internet_layout.addLayout(rv_actions)
+        relay_form = QGridLayout()
+        relay_form.addWidget(QLabel("Relay server"), 0, 0)
+        self.relay_host = QLineEdit()
+        self.relay_host.setMaxLength(255)
+        self.relay_host.setPlaceholderText("Relay host for NAT'd peers")
+        relay_form.addWidget(self.relay_host, 0, 1)
+        relay_form.addWidget(QLabel("Relay port"), 1, 0)
+        self.relay_port = QSpinBox()
+        self.relay_port.setRange(1, 65535)
+        self.relay_port.setValue(50005)
+        relay_form.addWidget(self.relay_port, 1, 1)
+        relay_form.addWidget(QLabel("Relay token"), 2, 0)
+        self.relay_token = QLineEdit()
+        self.relay_token.setMaxLength(32)
+        self.relay_token.setPlaceholderText("Paste a token or reserve one")
+        relay_form.addWidget(self.relay_token, 2, 1)
+        internet_layout.addLayout(relay_form)
+        relay_actions = QHBoxLayout()
+        self.relay_reserve = action_button(
+            "Reserve relay slot", self._reserve_relay, True)
+        self.relay_send = action_button(
+            "Send via relay", self._send_via_relay)
+        for button in (self.relay_reserve, self.relay_send):
+            relay_actions.addWidget(button)
+        relay_actions.addStretch(1)
+        internet_layout.addLayout(relay_actions)
+        relay_note = QLabel(
+            "The relay splices raw bytes without reading them; TLS still runs "
+            "end to end with the paired peer. Tokens are single use bearer "
+            "secrets: share them over a verified channel only. Reserve one "
+            "per message. Relay chat carries direct messages only and blocks "
+            "the interface briefly with finite timeouts.")
+        relay_note.setObjectName("PageSubtitle")
+        relay_note.setWordWrap(True)
+        internet_layout.addWidget(relay_note)
         rv_note = QLabel(
             "Register announces the address above, signed by this device, "
             "every two minutes over plaintext TCP framing. Eavesdroppers see "
@@ -2668,6 +2703,49 @@ class MainWindow(QMainWindow):
         self.rv_register.setText("Withdraw")
         self.append(f"Announcing {ext_host} to rendezvous {server}.",
                     "Network")
+
+    @Slot()
+    def _reserve_relay(self) -> None:
+        """Hold one relay allocation and show its single-use token."""
+        host = self.relay_host.text().strip()
+        if not host:
+            self.append("Enter a relay server before reserving a slot.",
+                        "Network", "warning")
+            return
+        try:
+            token = self.service.relay_reserve(host, self.relay_port.value())
+        except (ValueError, RuntimeError, OSError) as error:
+            self.append(f"Reservation failed: {error}", "Network", "warning")
+            return
+        self.relay_token.setText(token)
+        self.append("Relay slot reserved; share the token like a code. "
+                    "One token carries one message.", "Network")
+
+    @Slot()
+    def _send_via_relay(self) -> None:
+        """Send the message input as one DM through a relay token."""
+        selected = self.recipient.currentData()
+        if (not isinstance(selected, tuple) or len(selected) != 2
+                or selected[0] != "inet"):
+            self.append("Select one Internet peer before sending via relay.",
+                        "Transfers", "warning")
+            return
+        token = self.relay_token.text().strip()
+        host = self.relay_host.text().strip()
+        if not token or not host:
+            self.append("Enter a relay server and token first.",
+                        "Transfers", "warning")
+            return
+        try:
+            identifier = self.service.relay_send(
+                selected[1], host, self.relay_port.value(), token,
+                self.input.text())
+        except (ValueError, RuntimeError) as error:
+            self.append(str(error), "Transfers", "warning")
+            return
+        self._refresh_messages()
+        self.input.clear()
+        self.append(f"Relay DM {identifier[:8]}… queued.", "Transfers")
 
     @Slot()
     def _lookup_rendezvous(self) -> None:

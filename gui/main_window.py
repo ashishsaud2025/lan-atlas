@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from ipaddress import IPv4Address, ip_address
 from pathlib import Path
@@ -31,6 +32,7 @@ from core.peer_repository import (
 from core.post_signatures import verify_post
 from core.forwarding import ForwardingService
 from core.portal import PORTAL_PORT, PortalServer
+from core.protocol import envelope
 from core.roster import Peer
 from core.secure_transport import PairingCandidate, SecureTransportError
 from core.services import (DirectoryEntry, DirectoryKind, LocalServiceDirectory,
@@ -71,6 +73,20 @@ PAGE_GAMES = 8
 PAGE_ACTIVITY = 9
 PAGE_SETTINGS = 10
 TERMINAL_TRANSFERS = {"failed", "cancelled", "declined", "saved", "verified"}
+INTERNET_ACTIONS = {
+    "send": ("chat_v1", "Messages"),
+    "file": ("file_v1", "Transfers"),
+    "feed": ("posts_v1", "Feed"),
+    "directory": ("directory_v1", "Services"),
+}
+
+
+@dataclass(frozen=True)
+class _PendingInternet:
+    peer_id: str
+    action: str
+    text: str
+    draft_revision: int
 
 
 def _has_ipv4_endpoint(record: PeerRecord) -> bool:
@@ -129,6 +145,8 @@ class MainWindow(QMainWindow):
         self.inventory_request_id: str | None = None
         self._next_presence_refresh = 0.0
         self._rv_registered = False
+        self._pending_internet: dict[str, _PendingInternet] = {}
+        self._draft_revision = 0
         self.peer_model = PeerListModel()
         self.peer_table_model = PeerTableModel()
         self.message_model = MessageListModel()
@@ -157,6 +175,7 @@ class MainWindow(QMainWindow):
         height = min(900, available.height()) if available is not None else 900
         self.resize(width, height)
         self._build_shell()
+        self.input.textChanged.connect(self._mark_draft_changed)
         self.peer_selection.changed.connect(self._sync_peer_selection)
         self._apply_responsive_layout(self.width())
         self._install_shortcuts()
@@ -2378,19 +2397,12 @@ class MainWindow(QMainWindow):
         """Queue a room or direct message without blocking the GUI."""
         text = self.input.text()
         selected = self.recipient.currentData()
-        try:
-            internet = self._internet_peer_for(selected)
-        except (ValueError, RuntimeError) as error:
-            self.append(str(error), "Messages", "warning")
+        if self._queue_internet_action(selected, "send", text):
             return
-        if internet is not None:
-            peers: tuple[Peer, ...] = (internet,)
-            direct = True
-        else:
-            peers = tuple(record.as_peer()
-                          for record in self.service.peer_repository.supporting("chat_v1")
-                          if selected is None or record.session_id == selected)
-            direct = selected is not None
+        peers = tuple(record.as_peer()
+                      for record in self.service.peer_repository.supporting("chat_v1")
+                      if selected is None or record.session_id == selected)
+        direct = selected is not None
         try:
             self.service.send(text, peers, direct)
         except (ValueError, RuntimeError) as error:
@@ -2459,6 +2471,7 @@ class MainWindow(QMainWindow):
                             "warning" if any(word in text.lower()
                                              for word in ("failed", "stopped")) else "info")
         self.service.flush_repository_events()
+        self._drain_internet_actions()
         self._refresh_messages()
         now = time.monotonic()
         if now >= self._next_presence_refresh:
@@ -2606,12 +2619,70 @@ class MainWindow(QMainWindow):
         index = self.directory_peer.findData(selected)
         self.directory_peer.setCurrentIndex(max(0, index))
 
-    def _internet_peer_for(self, data: object) -> Peer | None:
-        """Dial one address book entry, returning None for LAN selections."""
+    @Slot(str)
+    def _mark_draft_changed(self, text: str) -> None:
+        self._draft_revision += 1
+
+    def _queue_internet_action(self, data: object, action: str,
+                               text: str = "") -> bool:
+        """Capture an Internet action; return False only for LAN selections."""
         if (not isinstance(data, tuple) or len(data) != 2
                 or data[0] != "inet" or not isinstance(data[1], str)):
-            return None
-        return self.service.dial_peer(data[1])
+            return False
+        capability, category = INTERNET_ACTIONS[action]
+        if any(item.peer_id == data[1] and item.action == action
+               for item in self._pending_internet.values()):
+            self.append("Internet action already resolving; wait for its result.",
+                        category)
+            return True
+        try:
+            entry = self.service.address_book.get(data[1])
+            if entry is None:
+                raise ValueError("no address book entry for peer")
+            if capability not in entry.capabilities:
+                raise ValueError(f"Selected entry does not advertise {capability}.")
+            if action == "send":
+                envelope("CHAT", self.service.hello.peer_id,
+                         self.service.hello.session_id,
+                         {"scope": "room", "text": text})
+            token = self.service.dial_peer_async(data[1])
+        except (ValueError, RuntimeError) as error:
+            self.append(str(error), category, "warning")
+            return True
+        self._pending_internet[token] = _PendingInternet(
+            data[1], action, text, self._draft_revision)
+        self.append(f"Resolving {entry.label} for {category.lower()}...", category)
+        return True
+
+    def _drain_internet_actions(self) -> None:
+        for token, pending in tuple(self._pending_internet.items()):
+            if token not in self._pending_internet:
+                continue
+            category = INTERNET_ACTIONS[pending.action][1]
+            try:
+                peer = self.service.take_dial_result(token)
+                if peer is None:
+                    continue
+                del self._pending_internet[token]
+                if pending.action == "send":
+                    self.service.send(pending.text, (peer,), True)
+                    if (self._draft_revision == pending.draft_revision
+                            and self.recipient.currentData()
+                            == ("inet", pending.peer_id)):
+                        self.input.clear()
+                elif pending.action == "file":
+                    self._send_file_to_peer(peer)
+                elif pending.action == "feed":
+                    identifier = self.service.sync_posts(peer)
+                    self.append(f"Feed sync {identifier[:8]}… queued from "
+                                f"{peer.hello.name}.", category)
+                elif pending.action == "directory":
+                    identifier = self.service.sync_directory(peer)
+                    self.append(f"Directory sync {identifier[:8]}… queued from "
+                                f"{peer.hello.name}.", category)
+            except (OSError, ValueError, RuntimeError) as error:
+                self._pending_internet.pop(token, None)
+                self.append(str(error), category, "warning")
 
     def _refresh_internet_list(self) -> None:
         """Render address book entries with live paired state."""
@@ -2819,28 +2890,17 @@ class MainWindow(QMainWindow):
     def _sync_directory(self) -> None:
         """Queue a catalog sync from the explicitly selected capable peer."""
         selected = self.directory_peer.currentData()
-        try:
-            internet = self._internet_peer_for(selected)
-        except (ValueError, RuntimeError) as error:
-            self.append(str(error), "Services", "warning")
+        if self._queue_internet_action(selected, "directory"):
             return
-        if internet is not None:
-            if "directory_v1" not in internet.hello.capabilities:
-                self.append("Selected entry does not share its catalog.",
-                            "Services", "warning")
-                return
-            peer = internet
-            name = internet.hello.name
-        else:
-            record = self.service.peer_repository.get(
-                selected if isinstance(selected, str) else None)
-            if (record is None or not record.nearby
-                    or "directory_v1" not in record.hello.capabilities):
-                self.append("Select one directory-capable peer before syncing.",
-                            "Services", "warning")
-                return
-            peer = record.as_peer()
-            name = record.hello.name
+        record = self.service.peer_repository.get(
+            selected if isinstance(selected, str) else None)
+        if (record is None or not record.nearby
+                or "directory_v1" not in record.hello.capabilities):
+            self.append("Select one directory-capable peer before syncing.",
+                        "Services", "warning")
+            return
+        peer = record.as_peer()
+        name = record.hello.name
         try:
             identifier = self.service.sync_directory(peer)
         except (ValueError, RuntimeError) as error:
@@ -3458,13 +3518,7 @@ class MainWindow(QMainWindow):
     def send_file(self) -> None:
         """Select a source file for one explicitly selected chat peer."""
         selected = self.recipient.currentData()
-        try:
-            internet = self._internet_peer_for(selected)
-        except (ValueError, RuntimeError) as error:
-            self.append(str(error), "Transfers", "warning")
-            return
-        if internet is not None:
-            self._send_file_to_peer(internet)
+        if self._queue_internet_action(selected, "file"):
             return
         record = self.service.peer_repository.get(
             selected if isinstance(selected, str) else None)
@@ -3484,11 +3538,12 @@ class MainWindow(QMainWindow):
         if not filename:
             return
         try:
+            self.service.validate_dial_peer(peer)
             identifier = self.service.transfers.send(Path(filename), peer)
             self.update_transfer({"id": identifier, "name": Path(filename).name,
                                   "state": "preparing"})
             self.navigation.select(PAGE_TRANSFERS)
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RuntimeError) as error:
             self.append(str(error), "Transfers", "warning")
 
     @Slot()
@@ -3534,26 +3589,16 @@ class MainWindow(QMainWindow):
     def sync_feed(self) -> None:
         """Queue feed paging from the explicitly selected capable peer."""
         selected = self.feed_peer.currentData()
-        try:
-            internet = self._internet_peer_for(selected)
-        except (ValueError, RuntimeError) as error:
-            self.append(str(error), "Feed", "warning")
+        if self._queue_internet_action(selected, "feed"):
             return
-        if internet is not None:
-            if "posts_v1" not in internet.hello.capabilities:
-                self.append("Selected entry does not share posts.",
-                            "Feed", "warning")
-                return
-            peer = internet
-        else:
-            record = self.service.peer_repository.get(
-                selected if isinstance(selected, str) else None)
-            if (record is None or not record.nearby
-                    or "posts_v1" not in record.hello.capabilities):
-                self.append("Select one posts-capable peer before syncing.",
-                            "Feed", "warning")
-                return
-            peer = record.as_peer()
+        record = self.service.peer_repository.get(
+            selected if isinstance(selected, str) else None)
+        if (record is None or not record.nearby
+                or "posts_v1" not in record.hello.capabilities):
+            self.append("Select one posts-capable peer before syncing.",
+                        "Feed", "warning")
+            return
+        peer = record.as_peer()
         try:
             identifier = self.service.sync_posts(peer)
         except (ValueError, RuntimeError) as error:
@@ -3605,6 +3650,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         """Cancel core work; the entry point joins after the Qt loop exits."""
         self.timer.stop()
+        self._pending_internet.clear()
         self.portal.stop()
         self.forwarder.stop()
         self.service.stop()

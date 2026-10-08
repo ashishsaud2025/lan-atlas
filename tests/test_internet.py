@@ -240,9 +240,9 @@ def test_gui_internet_card_blocks_unpaired_dialog(
         assert window.internet_list.count() == 0
         window._add_internet_peer()
         assert "paired session" in window.log.toPlainText()
-        assert window._internet_peer_for("session-id") is None
-        with pytest.raises(ValueError, match="no address book entry"):
-            window._internet_peer_for(("inet", str(uuid4())))
+        assert not window._queue_internet_action("session-id", "send")
+        assert window._queue_internet_action(("inet", str(uuid4())), "send")
+        assert "no address book entry" in window.log.toPlainText()
     finally:
         window.close()
         app.processEvents()

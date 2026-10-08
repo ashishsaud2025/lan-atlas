@@ -30,6 +30,9 @@ PAGE_LIMIT = 50
 MAX_GUESTS = 128
 GUEST_TTL_S = 86400.0
 MAX_DISPLAY_NAME = 64
+MAX_CHAT_TEXT = 2000
+MAX_CHAT_BODY = 16384
+CHAT_RATE_S = 1.0
 
 
 class GuestStore:
@@ -146,12 +149,49 @@ class PortalContent:
     def __init__(self, hello: Hello, peers: PeerRepository,
                  posts: PostStore | None,
                  messages: MessageJournal | None = None,
-                 directory: LocalServiceDirectory | None = None) -> None:
+                 directory: LocalServiceDirectory | None = None,
+                 room_sender: Any | None = None) -> None:
         self.hello = hello
         self.peers = peers
         self.posts = posts
         self.messages_store = messages or MessageJournal()
         self.directory_store = directory or LocalServiceDirectory(hello)
+        self.room_sender = room_sender
+        self.guests = GuestStore()
+        self._chat_last: dict[str, float] = {}
+        self._chat_lock = threading.Lock()
+
+    def publish_room(self, display_name: str, text: str,
+                     cookie: str | None) -> tuple[str, str | None]:
+        """Relay one guest room message through the existing chat fan-out."""
+        if self.room_sender is None:
+            raise RuntimeError("room sends are not configured")
+        name = _validate_display_name(display_name)
+        if not isinstance(text, str):
+            raise ValueError("chat text must be text")
+        message = text.strip()
+        if not message:
+            raise ValueError("chat text must not be empty")
+        if len(message) > MAX_CHAT_TEXT:
+            raise ValueError("chat text exceeds 2000 characters")
+        guest_id, set_cookie = self.guests.claim(name, cookie)
+        now = time.monotonic()
+        with self._chat_lock:
+            last = self._chat_last.get(guest_id, 0.0)
+            if now - last < CHAT_RATE_S:
+                raise RuntimeError("slow down")
+            self._chat_last[guest_id] = now
+        try:
+            message_id = self.room_sender(name, message)
+        except RuntimeError:
+            with self._chat_lock:
+                self._chat_last.pop(guest_id, None)
+            raise
+        if not isinstance(message_id, str) or not message_id:
+            raise RuntimeError("room sender returned no message ID")
+        header = (f"guest_id={guest_id}; Path=/; HttpOnly; SameSite=Lax"
+                  if set_cookie else None)
+        return message_id, header
 
     def status(self) -> dict[str, Any]:
         """Return current local and peer summary evidence."""
@@ -279,7 +319,11 @@ class _PortalHandler(BaseHTTPRequestHandler):
         self._handle(include_body=False)
 
     def do_POST(self) -> None:
-        """Reject browser writes until a permission and identity model exists."""
+        """Serve bounded guest writes; all other writes stay rejected."""
+        path = urlsplit(self.path).path.rstrip("/") or "/"
+        if path == "/api/chat/send":
+            self._handle_post_chat()
+            return
         self._method_not_allowed()
 
     def do_PUT(self) -> None:
@@ -345,6 +389,56 @@ class _PortalHandler(BaseHTTPRequestHandler):
                    "application/json; charset=utf-8", body, True,
                    {"Allow": "GET, HEAD"})
 
+    def _handle_post_chat(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Content length invalid."})
+            return
+        if length <= 0 or length > MAX_CHAT_BODY:
+            code = HTTPStatus.REQUEST_ENTITY_TOO_LARGE if length > MAX_CHAT_BODY else HTTPStatus.BAD_REQUEST
+            self._send_json(code, {"error": "Request body outside allowed range."})
+            return
+        try:
+            raw = self.rfile.read(length)
+        except (OSError, ValueError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body unreadable."})
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body is not valid JSON."})
+            return
+        if not isinstance(payload, dict):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body must be an object."})
+            return
+        try:
+            message_id, set_cookie = self.server.content.publish_room(
+                payload.get("display_name"), payload.get("text"),
+                self.headers.get("Cookie"))
+        except ValueError as error:
+            text = str(error)
+            code = (HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                    if "exceeds 2000" in text else HTTPStatus.BAD_REQUEST)
+            self._send_json(code, {"error": text or "Invalid chat send."})
+            return
+        except RuntimeError as error:
+            text = str(error)
+            if "slow down" in text or "queue full" in text:
+                self._send_json(HTTPStatus.TOO_MANY_REQUESTS,
+                                {"error": "Server busy, retry shortly."})
+            else:
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": "Room sends are not configured."})
+            return
+        extra = {"Set-Cookie": set_cookie} if set_cookie else None
+        self._send_json(HTTPStatus.OK, {"message_id": message_id}, extra)
+
+    def _send_json(self, status: HTTPStatus, value: dict[str, Any],
+                   extra: dict[str, str] | None = None) -> None:
+        self._send(status, "application/json; charset=utf-8",
+                   _json_bytes(value), True, extra)
+
     def _send(self, status: HTTPStatus, content_type: str, body: bytes,
               include_body: bool, extra_headers: dict[str, str] | None = None) -> None:
         self.send_response(status.value)
@@ -377,8 +471,10 @@ class PortalServer:
                  posts: PostStore | None = None,
                  messages: MessageJournal | None = None,
                  directory: LocalServiceDirectory | None = None,
+                 room_sender: Any | None = None,
                  allow_loopback: bool = False) -> None:
-        self.content = PortalContent(hello, peers, posts, messages, directory)
+        self.content = PortalContent(hello, peers, posts, messages, directory,
+                                     room_sender)
         self.allow_loopback = allow_loopback
         self._lock = threading.Lock()
         self._stop = threading.Event()

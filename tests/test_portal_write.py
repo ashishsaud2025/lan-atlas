@@ -131,3 +131,62 @@ def test_portal_chat_full_queue_returns_429() -> None:
     finally:
         portal.stop()
         assert portal.join(3)
+
+
+def test_portal_feed_post_stores_unsigned_guest_copy(tmp_path) -> None:
+    from core.storage import JsonLinesPostStore
+
+    hello = _hello()
+    service = ChatService(hello)
+    store = JsonLinesPostStore(tmp_path / "posts.jsonl")
+    portal = PortalServer(hello, service.peer_repository, store,
+                          service.message_journal, None, allow_loopback=True)
+    state = portal.start("127.0.0.1", 0)
+    assert state.port is not None
+    try:
+        status, _, body = _post(
+            state.port, "/api/feed/post",
+            json.dumps({"display_name": "Phone", "text": "hello feed"}).encode("utf-8"))
+        assert status == 200
+        post_id = json.loads(body)["post_id"]
+        stored = store.get(post_id)
+        assert stored is not None
+        assert stored["text"] == "hello feed"
+        assert stored.get("guest_name") == "Phone"
+        assert "security" not in stored
+        connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=2)
+        try:
+            connection.request("GET", "/api/feed")
+            feed = json.loads(connection.getresponse().read())
+        finally:
+            connection.close()
+        matches = [item for item in feed["items"] if item["post_id"] == post_id]
+        assert len(matches) == 1
+        assert matches[0]["provenance"] == "guest_unverified"
+    finally:
+        portal.stop()
+        assert portal.join(3)
+
+
+def test_portal_feed_rejects_oversize_and_empty(tmp_path) -> None:
+    from core.storage import JsonLinesPostStore
+
+    hello = _hello()
+    service = ChatService(hello)
+    store = JsonLinesPostStore(tmp_path / "posts.jsonl")
+    portal = PortalServer(hello, service.peer_repository, store,
+                          service.message_journal, None, allow_loopback=True)
+    state = portal.start("127.0.0.1", 0)
+    assert state.port is not None
+    try:
+        status, _, _ = _post(
+            state.port, "/api/feed/post",
+            json.dumps({"display_name": "P", "text": "x" * 5001}).encode("utf-8"))
+        assert status == 413
+        status, _, _ = _post(
+            state.port, "/api/feed/post",
+            json.dumps({"display_name": "P", "text": "  "}).encode("utf-8"))
+        assert status == 400
+    finally:
+        portal.stop()
+        assert portal.join(3)

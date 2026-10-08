@@ -16,6 +16,7 @@ import time
 from collections import OrderedDict
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from core.discovery import Hello
 from core.message_journal import MessageJournal
@@ -33,6 +34,8 @@ MAX_DISPLAY_NAME = 64
 MAX_CHAT_TEXT = 2000
 MAX_CHAT_BODY = 16384
 CHAT_RATE_S = 1.0
+MAX_FEED_TEXT = 5000
+MAX_FEED_BODY = 32768
 
 
 class GuestStore:
@@ -193,6 +196,33 @@ class PortalContent:
                   if set_cookie else None)
         return message_id, header
 
+    def publish_feed(self, display_name: str, text: str,
+                     cookie: str | None) -> tuple[str, str | None]:
+        """Store one unsigned guest post without forging authorship."""
+        if self.posts is None:
+            raise RuntimeError("post storage is not configured")
+        name = _validate_display_name(display_name)
+        if not isinstance(text, str):
+            raise ValueError("post text must be text")
+        body = text.strip()
+        if not body:
+            raise ValueError("post text must not be empty")
+        if len(body) > MAX_FEED_TEXT:
+            raise ValueError("post text exceeds 5000 characters")
+        guest_id, set_cookie = self.guests.claim(name, cookie)
+        post = {"post_id": str(uuid4()), "author_id": self.hello.peer_id,
+                "text": body, "created_ms": time.time_ns() // 1_000_000,
+                "refs": [], "guest_name": name, "guest_id": guest_id}
+        try:
+            stored = self.posts.add(post)
+        except ValueError as error:
+            raise ValueError(str(error) or "Invalid post.") from error
+        if not stored:
+            raise RuntimeError("generated duplicate post ID")
+        header = (f"guest_id={guest_id}; Path=/; HttpOnly; SameSite=Lax"
+                  if set_cookie else None)
+        return post["post_id"], header
+
     def status(self) -> dict[str, Any]:
         """Return current local and peer summary evidence."""
         summary = self.peers.overview_summary()
@@ -232,11 +262,17 @@ class PortalContent:
         names = {record.hello.peer_id: record.hello.name
                  for record in self.peers.snapshot()}
         names[self.hello.peer_id] = self.hello.name
-        items = [{**post, "author_name": names.get(post["author_id"],
-                                                    post["author_id"]),
-                  "provenance": ("published_local" if post["author_id"]
-                                 == self.hello.peer_id else "cached_copy")}
-                 for post in posts]
+        items = []
+        for post in posts:
+            guest = post.get("guest_name") if isinstance(post, dict) else None
+            if isinstance(guest, str) and guest:
+                items.append({**post, "author_name": f"{guest} (guest)",
+                              "provenance": "guest_unverified"})
+            else:
+                items.append({**post, "author_name": names.get(post["author_id"],
+                                                               post["author_id"]),
+                              "provenance": ("published_local" if post["author_id"]
+                                             == self.hello.peer_id else "cached_copy")})
         return {
             "available": True,
             "items": items,
@@ -323,6 +359,9 @@ class _PortalHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path.rstrip("/") or "/"
         if path == "/api/chat/send":
             self._handle_post_chat()
+            return
+        if path == "/api/feed/post":
+            self._handle_post_feed()
             return
         self._method_not_allowed()
 
@@ -433,6 +472,51 @@ class _PortalHandler(BaseHTTPRequestHandler):
             return
         extra = {"Set-Cookie": set_cookie} if set_cookie else None
         self._send_json(HTTPStatus.OK, {"message_id": message_id}, extra)
+
+    def _handle_post_feed(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Content length invalid."})
+            return
+        if length <= 0 or length > MAX_FEED_BODY:
+            code = HTTPStatus.REQUEST_ENTITY_TOO_LARGE if length > MAX_FEED_BODY else HTTPStatus.BAD_REQUEST
+            self._send_json(code, {"error": "Request body outside allowed range."})
+            return
+        try:
+            raw = self.rfile.read(length)
+        except (OSError, ValueError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body unreadable."})
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body is not valid JSON."})
+            return
+        if not isinstance(payload, dict):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body must be an object."})
+            return
+        try:
+            post_id, set_cookie = self.server.content.publish_feed(
+                payload.get("display_name"), payload.get("text"),
+                self.headers.get("Cookie"))
+        except ValueError as error:
+            text = str(error)
+            code = (HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                    if "exceeds 5000" in text else HTTPStatus.BAD_REQUEST)
+            self._send_json(code, {"error": text or "Invalid feed post."})
+            return
+        except RuntimeError as error:
+            text = str(error)
+            if "duplicate" in text:
+                self._send_json(HTTPStatus.TOO_MANY_REQUESTS,
+                                {"error": "Server busy, retry shortly."})
+            else:
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE,
+                                {"error": text or "Feed posts are not configured."})
+            return
+        extra = {"Set-Cookie": set_cookie} if set_cookie else None
+        self._send_json(HTTPStatus.OK, {"post_id": post_id}, extra)
 
     def _send_json(self, status: HTTPStatus, value: dict[str, Any],
                    extra: dict[str, str] | None = None) -> None:

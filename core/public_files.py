@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -41,7 +42,7 @@ class PublicFileRegistry:
                 raise ValueError("public file catalog is full")
             if self._total + len(data) > MAX_TOTAL_BYTES:
                 raise ValueError("public file storage is full")
-            tmp = self.root / (clean + ".tmp")
+            tmp = self.root / f".upload-{os.getpid()}-{secrets.token_hex(8)}.tmp"
             target = self.root / clean
             with tmp.open("wb") as stream:
                 stream.write(data)
@@ -105,7 +106,7 @@ def _validate_name(value: object) -> str:
         raise ValueError("file name must contain 1 to 255 characters")
     if name in {".", ".."}:
         raise ValueError("invalid file name")
-    if any(char in name for char in "/\\:"):
+    if any(char in name for char in "/\\:\";"):
         raise ValueError("invalid file name")
     if any(ord(char) < 32 or char == "\x7f" for char in name):
         raise ValueError("file name contains control characters")

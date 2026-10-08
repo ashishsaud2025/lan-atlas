@@ -5,6 +5,8 @@ import json
 import socket
 from uuid import uuid4
 
+import pytest
+
 from core.chat import ChatService
 from core.discovery import Hello
 from core.portal import GuestStore, PortalServer
@@ -55,6 +57,35 @@ def test_guest_forged_cookie_resolves_none() -> None:
     store = GuestStore()
     assert store.resolve("guest_id=deadbeef") is None
     assert store.resolve("guest_id=" + "0" * 32) is None
+
+
+def test_chat_rate_state_stays_bounded_under_guest_cycling() -> None:
+    from core.portal import PortalContent
+
+    hello = _hello()
+    service = ChatService(hello)
+    content = PortalContent(hello, service.peer_repository, None,
+                            service.message_journal, None,
+                            room_sender=lambda display, text: "x")
+    for index in range(300):
+        content.publish_room(f"Guest{index}", "hi", None,
+                             client=f"10.1.{index // 250}.{index % 250 + 1}")
+    assert len(content._chat_last) <= 256
+
+
+def test_cookieless_flood_from_one_address_is_throttled() -> None:
+    import pytest as _pytest
+
+    from core.portal import PortalContent
+
+    hello = _hello()
+    service = ChatService(hello)
+    content = PortalContent(hello, service.peer_repository, None,
+                            service.message_journal, None,
+                            room_sender=lambda display, text: "x")
+    content.publish_room("Phone", "first", None, client="192.168.1.50")
+    with _pytest.raises(RuntimeError, match="slow down"):
+        content.publish_room("Phone", "second", None, client="192.168.1.50")
 
 
 def test_portal_chat_send_journals_room_as_guest() -> None:
@@ -407,3 +438,56 @@ def test_service_guest_room_send_journals_without_peers() -> None:
     assert message_id
     texts = [entry.text for entry in service.message_journal.snapshot().entries]
     assert texts == ["Guest Phone: hello"]
+
+
+def test_service_guest_room_full_queue_raises() -> None:
+    import time
+
+    hello = _hello()
+    service = ChatService(hello)
+    recipient = Hello(str(uuid4()), str(uuid4()), "Peer", 50001, ("chat_v1",))
+    peer = Peer(recipient, "192.168.1.30", time.monotonic())
+    service.peer_repository.reconcile_presence((peer,), time.monotonic())
+    for _ in range(128):
+        service._outgoing.put_nowait((peer, {}))
+    with pytest.raises(RuntimeError, match="outbound queue full"):
+        service.send_guest_room("Phone", "hello")
+
+
+def test_portal_multipart_preserves_binary_edges(tmp_path) -> None:
+    data = b"\r\nbinary edges\r\n"
+    boundary = "----edge5678"
+    payload = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="display_name"\r\n\r\n'
+        "Browser\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="edge.bin"\r\n'
+        "Content-Type: application/octet-stream\r\n\r\n"
+    ).encode("latin-1") + data + f"\r\n--{boundary}--\r\n".encode("latin-1")
+    hello = _hello()
+    service = ChatService(hello)
+    portal = PortalServer(hello, service.peer_repository, None,
+                          service.message_journal, None,
+                          registry_root=tmp_path / "public",
+                          allow_loopback=True)
+    state = portal.start("127.0.0.1", 0)
+    assert state.port is not None
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=10)
+        try:
+            connection.request("POST", "/api/files/upload", body=payload,
+                               headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                                        "Content-Length": str(len(payload))})
+            assert connection.getresponse().status == 200
+        finally:
+            connection.close()
+        connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=2)
+        try:
+            connection.request("GET", "/api/files/download?id=edge.bin")
+            assert connection.getresponse().read() == data
+        finally:
+            connection.close()
+    finally:
+        portal.stop()
+        assert portal.join(3)

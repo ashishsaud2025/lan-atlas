@@ -94,6 +94,12 @@ class GuestStore:
             self._guests[guest_id]
             return "unverified_guest"
 
+    def live_ids(self) -> set[str]:
+        """Return unexpired guest IDs for bounded companion state."""
+        with self._lock:
+            self._expire(time.monotonic())
+            return set(self._guests)
+
     def _expire(self, now: float) -> None:
         stale = [key for key, (_, seen) in self._guests.items()
                  if now - seen > GUEST_TTL_S]
@@ -175,7 +181,9 @@ def _parse_multipart(raw: bytes, content_type: str) -> tuple[str | None, str, by
             if "filename=" in line:
                 filename = line.split("filename=")[1].strip().strip('"')
                 break
-        data = body.strip(b"\r\n")
+        if body.endswith(b"\r\n"):
+            body = body[:-2]
+        data = body
     if data is None:
         raise ValueError("Multipart body has no file part.")
     return filename, display, data
@@ -219,7 +227,7 @@ class PortalContent:
         self._chat_lock = threading.Lock()
 
     def publish_room(self, display_name: str, text: str,
-                     cookie: str | None) -> tuple[str, str | None]:
+                     cookie: str | None, client: str | None = None) -> tuple[str, str | None]:
         """Relay one guest room message through the existing chat fan-out."""
         if self.room_sender is None:
             raise RuntimeError("room sends are not configured")
@@ -231,13 +239,20 @@ class PortalContent:
             raise ValueError("chat text must not be empty")
         if len(message) > MAX_CHAT_TEXT:
             raise ValueError("chat text exceeds 2000 characters")
+        presented = _extract_guest_id(cookie) is not None
         guest_id, set_cookie = self.guests.claim(name, cookie)
+        key = guest_id if presented else f"ip:{client or 'unknown'}"
         now = time.monotonic()
         with self._chat_lock:
-            last = self._chat_last.get(guest_id, 0.0)
+            for stale in set(self._chat_last) - self.guests.live_ids():
+                if not stale.startswith("ip:"):
+                    del self._chat_last[stale]
+            while len(self._chat_last) >= 2 * MAX_GUESTS:
+                self._chat_last.pop(next(iter(self._chat_last)))
+            last = self._chat_last.get(key, 0.0)
             if now - last < CHAT_RATE_S:
                 raise RuntimeError("slow down")
-            self._chat_last[guest_id] = now
+            self._chat_last[key] = now
         try:
             message_id = self.room_sender(name, message)
         except RuntimeError:
@@ -531,7 +546,7 @@ class _PortalHandler(BaseHTTPRequestHandler):
         try:
             message_id, set_cookie = self.server.content.publish_room(
                 payload.get("display_name"), payload.get("text"),
-                self.headers.get("Cookie"))
+                self.headers.get("Cookie"), client=self.client_address[0])
         except ValueError as error:
             text = str(error)
             code = (HTTPStatus.REQUEST_ENTITY_TOO_LARGE

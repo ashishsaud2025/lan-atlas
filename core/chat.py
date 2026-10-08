@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -14,7 +15,7 @@ import time
 from typing import Any
 from uuid import uuid4
 
-from core.addressbook import AddressBook
+from core.addressbook import AddressBook, AddressEntry
 from core.directory_sync import merge_page as merge_directory_page
 from core.directory_sync import serve_query as serve_directory_query
 from core.scope import is_internet_host
@@ -42,6 +43,20 @@ from core.transfer import TransferService
 
 MAX_SYNC_PAGES = 20
 _DIAL_CACHE_TTL = 120.0
+MAX_PENDING_DIALS = 8
+
+
+@dataclass(frozen=True, kw_only=True)
+class _DialedPeer(Peer):
+    entry: AddressEntry
+
+
+@dataclass
+class _DialRequest:
+    entry: AddressEntry
+    peer: Peer | None = None
+    error: str | None = None
+    done: bool = False
 
 
 class ChatService:
@@ -96,7 +111,13 @@ class ChatService:
             raise ValueError("directory must belong to the local session")
         self.remote_catalog = remote_catalog or RemoteDirectoryCache()
         self._directory_cursors: dict[str, dict[str, Any] | None] = {}
-        self._dial_cache: dict[str, tuple[str, str, float]] = {}
+        self._dial_cache: OrderedDict[
+            str, tuple[AddressEntry, str, str, float]] = OrderedDict()
+        self._dial_lock = threading.Lock()
+        self._dial_generation = 0
+        self._dial_requests: dict[str, _DialRequest] = {}
+        self._dial_queue: Queue[str] = Queue(maxsize=MAX_PENDING_DIALS)
+        self._dial_thread: threading.Thread | None = None
         self._rv_config: tuple[str, int, str, int, int] | None = None
         self._rv_config_lock = threading.Lock()
         self._rv_thread: threading.Thread | None = None
@@ -229,6 +250,12 @@ class ChatService:
 
     def dial_peer(self, peer_id: str) -> Peer:
         """Resolve one address book entry to a live Peer via TLS probe."""
+        entry = self._dial_entry(peer_id)
+        return self._probe_dial_entry(entry)
+
+    def _dial_entry(self, peer_id: str) -> AddressEntry:
+        if self._stop.is_set():
+            raise RuntimeError("service is stopping")
         if self.secure_transport is None:
             raise RuntimeError("secure transport is not configured")
         entry = self.address_book.get(peer_id)
@@ -240,25 +267,111 @@ class ChatService:
             raise ValueError("entry peer is not paired; pair on LAN first")
         if record.fingerprint != entry.fingerprint:
             raise ValueError("entry certificate differs from paired key")
-        cached = self._dial_cache.get(entry.peer_id)
-        if (cached is not None
-                and time.monotonic() - cached[2] < _DIAL_CACHE_TTL):
-            session_id, address = cached[0], cached[1]
+        return entry
+
+    def _validate_dial_entry(self, entry: AddressEntry) -> None:
+        if self._dial_entry(entry.peer_id) != entry:
+            raise ValueError("address book entry changed while resolving")
+
+    def _probe_dial_entry(self, entry: AddressEntry) -> Peer:
+        self._validate_dial_entry(entry)
+        with self._dial_lock:
+            cached = self._dial_cache.get(entry.peer_id)
+            generation = self._dial_generation
+        if (cached is not None and cached[0] == entry
+                and time.monotonic() - cached[3] < _DIAL_CACHE_TTL):
+            session_id, address = cached[1], cached[2]
         else:
             try:
+                assert self.secure_transport is not None
                 session_id, address = self.secure_transport.probe_session(
-                    entry.host, entry.port, entry.peer_id)
+                    entry.host, entry.port, entry.peer_id, cancel=self._stop)
             except (OSError, SecureTransportError, ValueError) as error:
                 raise ValueError(f"dial failed: {error}") from error
-            self._dial_cache[entry.peer_id] = (
-                session_id, address, time.monotonic())
+            self._validate_dial_entry(entry)
+            with self._dial_lock:
+                if self._stop.is_set():
+                    raise RuntimeError("service is stopping")
+                if generation == self._dial_generation:
+                    self._dial_cache[entry.peer_id] = (
+                        entry, session_id, address, time.monotonic())
+                    self._dial_cache.move_to_end(entry.peer_id)
+                    while len(self._dial_cache) > 128:
+                        self._dial_cache.popitem(last=False)
+        self._validate_dial_entry(entry)
         hello = Hello(entry.peer_id, session_id, entry.label, entry.port,
                       entry.capabilities, entry.port, entry.fingerprint)
-        return Peer(hello, address, time.monotonic())
+        return _DialedPeer(hello, address, time.monotonic(), entry=entry)
+
+    def validate_dial_peer(self, peer: Peer) -> None:
+        """Recheck direct-dial provenance before a deferred action uses a peer."""
+        if isinstance(peer, _DialedPeer):
+            self._validate_dial_entry(peer.entry)
 
     def _drop_dial_cache(self, peer_id: str) -> None:
         """Forget one probed session so the next dial re-resolves it."""
-        self._dial_cache.pop(peer_id, None)
+        with self._dial_lock:
+            self._dial_cache.pop(peer_id, None)
+            self._dial_generation += 1
+
+    def dial_peer_async(self, peer_id: str) -> str:
+        """Queue a bounded session probe and return its single-use result token."""
+        entry = self._dial_entry(peer_id)
+        with self._dial_lock:
+            if self._stop.is_set():
+                raise RuntimeError("service is stopping")
+            if len(self._dial_requests) >= MAX_PENDING_DIALS:
+                raise RuntimeError("Internet dial queue full")
+            if self._dial_thread is None:
+                worker = threading.Thread(
+                    target=self._resolve_worker, name="internet-dial", daemon=True)
+                worker.start()
+                self._dial_thread = worker
+            token = str(uuid4())
+            self._dial_requests[token] = _DialRequest(entry)
+            self._dial_queue.put_nowait(token)
+        return token
+
+    def take_dial_result(self, token: str) -> Peer | None:
+        """Consume a validated result, raise its error, or return None if pending."""
+        with self._dial_lock:
+            if self._stop.is_set():
+                raise RuntimeError("service is stopping")
+            request = self._dial_requests.get(token)
+            if request is None:
+                raise ValueError("unknown Internet dial token")
+            if not request.done:
+                return None
+            del self._dial_requests[token]
+        if request.error is not None:
+            raise ValueError(request.error)
+        self._validate_dial_entry(request.entry)
+        assert request.peer is not None
+        return request.peer
+
+    def _resolve_worker(self) -> None:
+        while not self._stop.is_set():
+            try:
+                token = self._dial_queue.get(timeout=0.1)
+            except Empty:
+                continue
+            with self._dial_lock:
+                request = self._dial_requests.get(token)
+            if request is None or self._stop.is_set():
+                continue
+            peer, failure = None, None
+            try:
+                peer = self._probe_dial_entry(request.entry)
+            except (OSError, ValueError, RuntimeError) as error:
+                failure = str(error)
+                logging.info("Internet dial failed: %s", error)
+            except Exception as error:
+                logging.exception("Unexpected Internet dial failure")
+                failure = f"Internet dial failed: {error}"
+            with self._dial_lock:
+                if self._stop.is_set():
+                    continue
+                request.peer, request.error, request.done = peer, failure, True
 
     def relay_reserve(self, host: str, port: int) -> str:
         """Hold one relay allocation and serve a single inbound DM."""
@@ -554,6 +667,14 @@ class ChatService:
     def stop(self) -> None:
         """Request cancellation and interrupt established sockets without blocking UI."""
         self._stop.set()
+        with self._dial_lock:
+            self._dial_requests.clear()
+            self._dial_cache.clear()
+            while True:
+                try:
+                    self._dial_queue.get_nowait()
+                except Empty:
+                    break
         self.transfers.stop()
         self.diagnostics.stop()
         with self._lock:
@@ -573,9 +694,14 @@ class ChatService:
         deadline = time.monotonic() + timeout
         for thread in self._threads:
             thread.join(max(0, deadline - time.monotonic()))
+        with self._dial_lock:
+            dial_thread = self._dial_thread
+        if dial_thread is not None:
+            dial_thread.join(max(0, deadline - time.monotonic()))
         transfers_done = self.transfers.join(max(0, deadline - time.monotonic()))
         diagnostics_done = self.diagnostics.join(max(0, deadline - time.monotonic()))
         return (transfers_done and diagnostics_done
+                and (dial_thread is None or not dial_thread.is_alive())
                 and not any(thread.is_alive() for thread in self._threads))
 
     def set_discovery_source_addresses(
@@ -884,6 +1010,7 @@ class ChatService:
                 logging.debug("Close raced stopped service: %s", error)
 
     def _connect_peer(self, peer: Peer) -> tuple[socket.socket, bool]:
+        self.validate_dial_peer(peer)
         addresses = candidate_ips(peer)
         paired = (self.secure_transport is not None
                   and self.secure_transport.trust_store.get(peer.hello.peer_id)
@@ -892,7 +1019,7 @@ class ChatService:
             internet = any(is_internet_host(address) for address in addresses)
         except ValueError as error:
             raise ValueError(f"peer address invalid: {error}") from error
-        if internet and not paired:
+        if (internet or isinstance(peer, _DialedPeer)) and not paired:
             raise ValueError("unpaired Internet dial refused; pair on LAN first")
         if paired:
             assert self.secure_transport is not None

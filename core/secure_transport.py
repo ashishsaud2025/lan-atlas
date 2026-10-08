@@ -214,8 +214,10 @@ class SecureTransport:
             raise SecureTransportError("secure handshake failed") from error
 
     def probe_session(self, host: str, port: int,
-                      peer_id: str) -> tuple[str, str]:
+                      peer_id: str, *,
+                      cancel: threading.Event | None = None) -> tuple[str, str]:
         """Learn one paired peer's live session and pinned address."""
+        _check_probe_cancelled(cancel)
         record = self.trust_store.get(peer_id)
         if record is None:
             raise SecureTransportError("peer is not paired")
@@ -225,10 +227,11 @@ class SecureTransport:
             raise SecureTransportError(f"probe target invalid: {error}") from error
         error: Exception | None = None
         for target in targets:
+            _check_probe_cancelled(cancel)
             try:
                 return (self._probe_one(target, port, record.peer_id,
                                         record.certificate_der,
-                                        record.fingerprint), target)
+                                        record.fingerprint, cancel), target)
             except (OSError, SecureTransportError, ValueError) as exc:
                 error = exc
                 continue
@@ -236,18 +239,27 @@ class SecureTransport:
         raise error
 
     def _probe_one(self, host: str, port: int, peer_id: str,
-                   certificate_der: bytes, fingerprint: str) -> str:
+                    certificate_der: bytes, fingerprint: str,
+                    cancel: threading.Event | None = None) -> str:
         """Complete one TLS handshake and return the live session ID."""
         tls_socket: ssl.SSLSocket | None = None
         raw_socket: socket.socket | None = None
         try:
-            raw_socket = socket.create_connection(
-                (host, port), timeout=CONNECT_TIMEOUT)
+            _check_probe_cancelled(cancel)
+            family = socket.AF_INET6 if ":" in host else socket.AF_INET
+            raw_socket = socket.socket(family, socket.SOCK_STREAM)
+            raw_socket.settimeout(CONNECT_TIMEOUT)
+            self._observe_socket(raw_socket, True)
+            _check_probe_cancelled(cancel)
+            raw_socket.connect((host, port))
+            _check_probe_cancelled(cancel)
             raw_socket.settimeout(HANDSHAKE_TIMEOUT)
             tls_socket = self._client_context.wrap_socket(
                 raw_socket, server_hostname=None, do_handshake_on_connect=False)
+            self._observe_socket(raw_socket, False)
             raw_socket = None
             self._observe_socket(tls_socket, True)
+            _check_probe_cancelled(cancel)
             tls_socket.do_handshake()
             presented = _peer_certificate(tls_socket)
             presented_fingerprint = _certificate_fingerprint(
@@ -277,6 +289,7 @@ class SecureTransport:
             raise SecureTransportError("session probe failed") from error
         finally:
             self._observe_socket(tls_socket, False)
+            self._observe_socket(raw_socket, False)
             _close_sockets(tls_socket, raw_socket)
 
     def accept(self, raw_socket: socket.socket,
@@ -771,6 +784,11 @@ def _comparison_code(nonce: str, first_fingerprint: str,
     ).hexdigest()[:16].upper()
     return "-".join(digest[index:index + 4]
                     for index in range(0, len(digest), 4))
+
+
+def _check_probe_cancelled(cancel: threading.Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise SecureTransportError("session probe cancelled")
 
 
 def _close_sockets(tls_socket: ssl.SSLSocket | None,

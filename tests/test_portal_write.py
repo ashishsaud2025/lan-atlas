@@ -267,3 +267,122 @@ def test_portal_files_reject_traversal_and_oversize(tmp_path) -> None:
     finally:
         portal.stop()
         assert portal.join(3)
+
+
+def test_pages_expose_guest_forms_and_plaintext_warning(tmp_path) -> None:
+    from core.storage import JsonLinesPostStore
+
+    hello = _hello()
+    service = ChatService(hello)
+    store = JsonLinesPostStore(tmp_path / "posts.jsonl")
+    portal = PortalServer(hello, service.peer_repository, store,
+                          service.message_journal, None,
+                          room_sender=lambda display, text: "x",
+                          registry_root=tmp_path / "public",
+                          allow_loopback=True)
+    state = portal.start("127.0.0.1", 0)
+    assert state.port is not None
+    try:
+        for path in ("/chat", "/feed", "/files"):
+            connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=2)
+            try:
+                connection.request("GET", path)
+                response = connection.getresponse()
+                page = response.read().decode("utf-8")
+                assert response.status == 200
+            finally:
+                connection.close()
+            assert "<form" in page
+        connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=2)
+        try:
+            connection.request("GET", "/chat")
+            chat_page = connection.getresponse().read().decode("utf-8")
+        finally:
+            connection.close()
+        assert "plaintext" in chat_page.lower()
+    finally:
+        portal.stop()
+        assert portal.join(3)
+
+
+def test_portal_accepts_plain_browser_form_posts(tmp_path) -> None:
+    from urllib.parse import urlencode
+
+    from core.storage import JsonLinesPostStore
+
+    hello = _hello()
+    service = ChatService(hello)
+    recipient = Hello(str(uuid4()), str(uuid4()), "Peer", 50001, ("chat_v1",))
+    peer = Peer(recipient, "192.168.1.30", 1.0)
+    store = JsonLinesPostStore(tmp_path / "posts.jsonl")
+    portal = PortalServer(hello, service.peer_repository, store,
+                          service.message_journal, None,
+                          room_sender=_room_sender(service, peer),
+                          registry_root=tmp_path / "public",
+                          allow_loopback=True)
+    state = portal.start("127.0.0.1", 0)
+    assert state.port is not None
+    try:
+        body = urlencode({"display_name": "Browser", "text": "form hi"}).encode("utf-8")
+        connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=2)
+        try:
+            connection.request("POST", "/api/chat/send", body=body,
+                               headers={"Content-Type": "application/x-www-form-urlencoded",
+                                        "Content-Length": str(len(body))})
+            assert connection.getresponse().status == 200
+        finally:
+            connection.close()
+        body = urlencode({"display_name": "Browser", "text": "form post"}).encode("utf-8")
+        connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=2)
+        try:
+            connection.request("POST", "/api/feed/post", body=body,
+                               headers={"Content-Type": "application/x-www-form-urlencoded",
+                                        "Content-Length": str(len(body))})
+            assert connection.getresponse().status == 200
+        finally:
+            connection.close()
+        assert store.count() == 1
+    finally:
+        portal.stop()
+        assert portal.join(3)
+
+
+def test_portal_accepts_multipart_file_upload(tmp_path) -> None:
+    boundary = "----form1234"
+    payload = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="display_name"\r\n\r\n'
+        "Browser\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="form.txt"\r\n'
+        "Content-Type: application/octet-stream\r\n\r\n"
+    ).encode("latin-1") + b"form bytes" + f"\r\n--{boundary}--\r\n".encode("latin-1")
+    hello = _hello()
+    service = ChatService(hello)
+    portal = PortalServer(hello, service.peer_repository, None,
+                          service.message_journal, None,
+                          registry_root=tmp_path / "public",
+                          allow_loopback=True)
+    state = portal.start("127.0.0.1", 0)
+    assert state.port is not None
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=10)
+        try:
+            connection.request("POST", "/api/files/upload", body=payload,
+                               headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                                        "Content-Length": str(len(payload))})
+            response = connection.getresponse()
+            assert response.status == 200
+            entry = json.loads(response.read())
+        finally:
+            connection.close()
+        assert entry["name"] == "form.txt"
+        connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=2)
+        try:
+            connection.request("GET", "/api/files/download?id=form.txt")
+            assert connection.getresponse().read() == b"form bytes"
+        finally:
+            connection.close()
+    finally:
+        portal.stop()
+        assert portal.join(3)

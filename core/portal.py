@@ -130,6 +130,57 @@ def _extract_guest_id(cookie: object) -> str | None:
     return None
 
 
+def _parse_fields(raw: bytes, content_type: str) -> dict[str, Any]:
+    """Accept JSON objects or plain browser form bodies for guest writes."""
+    if "application/x-www-form-urlencoded" in content_type:
+        parsed = parse_qs(raw.decode("utf-8"))
+        return {key: values[0] for key, values in parsed.items() if values}
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Request body must be an object.")
+    return payload
+
+
+def _parse_upload(raw: bytes, content_type: str,
+                  headers: Any) -> tuple[str | None, str, bytes]:
+    """Accept raw octet uploads or one single-file browser form post."""
+    if "multipart/form-data" in content_type:
+        return _parse_multipart(raw, content_type)
+    return (headers.get("X-Filename"),
+            headers.get("X-Display-Name", "guest"), raw)
+
+
+def _parse_multipart(raw: bytes, content_type: str) -> tuple[str | None, str, bytes]:
+    parts = content_type.split("boundary=")
+    if len(parts) != 2 or not parts[1].strip():
+        raise ValueError("Multipart boundary missing.")
+    boundary = ("--" + parts[1].strip().strip('"')).encode("latin-1")
+    segments = raw.split(boundary)
+    if len(segments) < 3:
+        raise ValueError("Multipart body has no file part.")
+    filename: str | None = None
+    display = "guest"
+    data: bytes | None = None
+    for segment in segments[1:-1]:
+        head, _, body = segment.partition(b"\r\n\r\n")
+        if not _:
+            raise ValueError("Multipart part is malformed.")
+        text = head.decode("latin-1")
+        if 'name="display_name"' in text:
+            display = body.strip(b"\r\n").decode("utf-8", "strict").strip()
+            continue
+        if 'name="file"' not in text:
+            continue
+        for line in text.split("\r\n"):
+            if "filename=" in line:
+                filename = line.split("filename=")[1].strip().strip('"')
+                break
+        data = body.strip(b"\r\n")
+    if data is None:
+        raise ValueError("Multipart body has no file part.")
+    return filename, display, data
+
+
 @dataclass(frozen=True)
 class PortalState:
     """Immutable server lifecycle state for desktop presentation."""
@@ -473,12 +524,9 @@ class _PortalHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body unreadable."})
             return
         try:
-            payload = json.loads(raw.decode("utf-8"))
+            payload = _parse_fields(raw, self.headers.get("Content-Type", ""))
         except (UnicodeDecodeError, ValueError):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body is not valid JSON."})
-            return
-        if not isinstance(payload, dict):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body must be an object."})
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body is not valid."})
             return
         try:
             message_id, set_cookie = self.server.content.publish_room(
@@ -518,12 +566,9 @@ class _PortalHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body unreadable."})
             return
         try:
-            payload = json.loads(raw.decode("utf-8"))
+            payload = _parse_fields(raw, self.headers.get("Content-Type", ""))
         except (UnicodeDecodeError, ValueError):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body is not valid JSON."})
-            return
-        if not isinstance(payload, dict):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body must be an object."})
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body is not valid."})
             return
         try:
             post_id, set_cookie = self.server.content.publish_feed(
@@ -571,10 +616,19 @@ class _PortalHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "File body truncated."})
             return
         try:
+            filename, display, blob = _parse_upload(
+                data, self.headers.get("Content-Type", ""), self.headers)
+        except ValueError as error:
+            self._send_json(HTTPStatus.BAD_REQUEST,
+                            {"error": str(error) or "Invalid file upload."})
+            return
+        if len(blob) > MAX_FILE_BYTES:
+            self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                            {"error": "File exceeds 64 MiB."})
+            return
+        try:
             entry, set_cookie = content.publish_file(
-                self.headers.get("X-Filename"),
-                self.headers.get("X-Display-Name", "guest"),
-                data, self.headers.get("Cookie"))
+                filename, display, blob, self.headers.get("Cookie"))
         except ValueError as error:
             text = str(error) or "Invalid file upload."
             if "exceeds 64" in text:
@@ -633,7 +687,7 @@ class _PortalHandler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
-            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+            "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
@@ -807,7 +861,7 @@ def _render_page(path: str, content: PortalContent) -> str:
 <header><div class="eyebrow">LAN ATLAS PORTAL</div><h1>{node}</h1>
 <div class="muted">Selected services from this device, available without Internet.</div>
 <nav>{nav}</nav></header>
-<main><div class="notice">Unverified LAN. Traffic is plaintext and browser writes are disabled.</div>
+<main><div class="notice">Unverified LAN. Traffic is plaintext. Browser guests post as unverified.</div>
 {page}<footer>Hosted directly by {node}. Administrative tools are not exposed.</footer></main>
 </body>
 </html>"""
@@ -818,9 +872,9 @@ def _page_content(path: str, content: PortalContent,
     peers = status["peers"]
     if path == "/":
         cards = (
-            ("/files", "Files", "No public catalog yet"),
-            ("/chat", "Chat", "Read-only nearby room history"),
-            ("/feed", "Feed", "Local and cached posts"),
+            ("/files", "Files", "Explicit public downloads"),
+            ("/chat", "Chat", "Nearby room history plus guest send"),
+            ("/feed", "Feed", "Local, cached, and guest posts"),
             ("/services", "Services", "Explicit local publications"),
             ("/games", "Games", "Explicit local sessions"),
         )
@@ -839,13 +893,15 @@ def _page_content(path: str, content: PortalContent,
         if not feed["available"]:
             return "Feed", _empty_card("Feed unavailable", feed["reason"])
         posts = "".join(_post_card(post) for post in feed["items"])
-        return "Feed", (f"<h2>Local and cached feed</h2>{posts}" if posts else
-                        _empty_card("No cached posts", "Sync or publish from the desktop app."))
+        history = (f"<h2>Local and cached feed</h2>{posts}" if posts else
+                   _empty_card("No cached posts", "Sync or publish from the desktop app."))
+        return "Feed", _guest_feed_form() + history
     if path == "/chat":
         messages = content.messages()
         rows = "".join(_message_card(message) for message in messages["items"])
-        return "Chat", (f"<h2>Nearby room history</h2>{rows}" if rows else
-                        _empty_card("No room messages", "History is retained for this process only."))
+        history = (f"<h2>Nearby room history</h2>{rows}" if rows else
+                   _empty_card("No room messages", "History is retained for this process only."))
+        return "Chat", _guest_chat_form() + history
     if path in {"/services", "/games"}:
         kind = DirectoryKind.SERVICE if path == "/services" else DirectoryKind.GAME
         directory = content.directory(kind)
@@ -854,11 +910,58 @@ def _page_content(path: str, content: PortalContent,
         return title, (f"<h2>Published {title.lower()}</h2>{rows}" if rows else
                        _empty_card(f"No {title.lower()} published",
                                    "Publish one from desktop Settings."))
+    if path == "/files":
+        snapshot = content.unavailable("files")
+        if not snapshot["available"]:
+            return "Files", _guest_file_form() + _empty_card(
+                "No public files", snapshot["reason"])
+        rows = "".join(_public_file_card(entry) for entry in snapshot["items"])
+        listing = (f"<h2>Public files</h2>{rows}" if rows else
+                   _empty_card("No public files",
+                               "Publish one from this page or the desktop app."))
+        return "Files", _guest_file_form() + listing
     names = {
         "/files": ("Files", "No public files", "files"),
     }
     title, heading, kind = names[path]
     return title, _empty_card(heading, content.unavailable(kind)["reason"])
+
+
+def _guest_chat_form() -> str:
+    return ('<section class="card"><h2>Send as guest</h2>'
+            '<form method="post" action="/api/chat/send">'
+            '<label>Display name <input name="display_name" maxlength="64" required></label> '
+            '<label>Message <input name="text" maxlength="2000" required></label> '
+            '<button type="submit">Send</button></form>'
+            '<div class="muted">Posted as unverified guest over plaintext.</div></section>')
+
+
+def _guest_feed_form() -> str:
+    return ('<section class="card"><h2>Post as guest</h2>'
+            '<form method="post" action="/api/feed/post">'
+            '<label>Display name <input name="display_name" maxlength="64" required></label> '
+            '<label>Post <input name="text" maxlength="5000" required></label> '
+            '<button type="submit">Post</button></form>'
+            '<div class="muted">Stored unsigned as unverified guest.</div></section>')
+
+
+def _guest_file_form() -> str:
+    return ('<section class="card"><h2>Share a public file</h2>'
+            '<form method="post" action="/api/files/upload" enctype="multipart/form-data">'
+            '<label>Display name <input name="display_name" maxlength="64" required></label> '
+            '<label>File <input type="file" name="file" required></label> '
+            '<button type="submit">Upload</button></form>'
+            '<div class="muted">At most 64 MiB per file. Names cannot be overwritten.</div></section>')
+
+
+def _public_file_card(entry: dict[str, Any]) -> str:
+    file_id = escape(str(entry["file_id"]), quote=True)
+    name = escape(str(entry["name"]))
+    size = escape(str(entry["size"]))
+    digest = escape(str(entry["sha256"]))
+    return (f'<article class="card post"><h2>{name}</h2>'
+            f'<div class="meta">{size} bytes | sha256 {digest}</div>'
+            f'<p><a href="/api/files/download?id={file_id}">Download</a></p></article>')
 
 
 def _empty_card(title: str, detail: str) -> str:

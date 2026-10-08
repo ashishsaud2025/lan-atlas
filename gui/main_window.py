@@ -108,7 +108,8 @@ class MainWindow(QMainWindow):
     def __init__(self, service: ChatService,
                  portal: PortalServer | None = None,
                  directory: LocalServiceDirectory | None = None,
-                 forwarder: ForwardingService | None = None) -> None:
+                 forwarder: ForwardingService | None = None,
+                 portal_public_dir: Path | None = None) -> None:
         super().__init__()
         self.settings = QSettings("LAN Manager", "LAN Atlas")
         self.theme_mode = str(self.settings.value("appearance/theme", "observatory"))
@@ -132,7 +133,9 @@ class MainWindow(QMainWindow):
             raise ValueError("directory must belong to the local session")
         self.portal = portal or PortalServer(
             service.hello, service.peer_repository, service.post_store,
-            service.message_journal, self.directory)
+            service.message_journal, self.directory,
+            room_sender=service.send_guest_room,
+            registry_root=portal_public_dir)
         self.forwarder = forwarder or ForwardingService()
         self.peer_records: tuple[PeerRecord, ...] = service.peer_repository.snapshot()
         self._peer_revision = 0
@@ -1294,8 +1297,10 @@ class MainWindow(QMainWindow):
         portal_header.addWidget(self.portal_status)
         portal_layout.addLayout(portal_header)
         portal_detail = QLabel(
-            "Serve selected read-only LAN Atlas pages to a normal browser. Choose one "
-            "concrete LAN address; the portal never binds every interface implicitly.")
+            "Serve selected LAN Atlas pages to a normal browser. Choose one "
+            "concrete LAN address; the portal never binds every interface implicitly. "
+            "Guests can send room chat, post to the feed, and share explicit public "
+            "files as unverified.")
         portal_detail.setObjectName("PageSubtitle")
         portal_detail.setWordWrap(True)
         portal_layout.addWidget(portal_detail)
@@ -1337,8 +1342,9 @@ class MainWindow(QMainWindow):
         portal_actions.addStretch(1)
         portal_layout.addLayout(portal_actions)
         portal_warning = QLabel(
-            "Portal traffic is plaintext and unauthenticated. Browser writes, diagnostics, "
-            "settings, uploads, and shell access are not exposed.")
+            "Portal traffic is plaintext and unauthenticated. Browser guests post as "
+            "unverified; uploads land in the explicit public directory. Diagnostics, "
+            "settings, and shell access are not exposed.")
         portal_warning.setObjectName("PageSubtitle")
         portal_warning.setWordWrap(True)
         portal_layout.addWidget(portal_warning)

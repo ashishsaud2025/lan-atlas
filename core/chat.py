@@ -206,6 +206,32 @@ class ChatService:
                             f"{peer.hello.name}: outbound queue full")
         return message["message_id"]
 
+    def send_guest_room(self, display_name: str, text: str) -> str:
+        """Relay one open LAN guest message to nearby room peers as host."""
+        if self._stop.is_set():
+            raise RuntimeError("service is stopping")
+        name = display_name.strip() if isinstance(display_name, str) else ""
+        if not name or any(ord(char) < 32 or char == "\x7f" for char in name):
+            raise ValueError("display name must be visible text")
+        message_text = text.strip() if isinstance(text, str) else ""
+        if not message_text:
+            raise ValueError("chat text must not be empty")
+        recipients = tuple(
+            record.as_peer() for record in self.peer_repository.supporting("chat_v1"))
+        body = {"scope": "room", "text": f"Guest {name}: {message_text}"}
+        message = envelope("CHAT", self.hello.peer_id, self.hello.session_id, body)
+        self.message_journal.record_outgoing(message, self.hello, recipients)
+        for peer in recipients:
+            try:
+                self._outgoing.put_nowait((peer, message))
+            except Full:
+                self.message_journal.update_delivery(
+                    message["message_id"], peer.hello.session_id, "failed",
+                    "outbound queue full")
+                self._event("status", f"Failed {message['message_id']} to "
+                            f"{peer.hello.name}: outbound queue full")
+        return message["message_id"]
+
     def publish_post(self, text: str, refs: list[dict[str, Any]] | None = None) -> str:
         """Persist an immutable local post and notify the UI."""
         if self.post_store is None:

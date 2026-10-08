@@ -79,6 +79,8 @@ def main() -> int:
     parser.add_argument("--post-file", type=Path, default=root / "lan-manager/posts.jsonl")
     parser.add_argument("--catalog-file", type=Path,
                         default=root / "lan-manager/remote-catalog.json")
+    parser.add_argument("--public-dir", type=Path,
+                        default=root / "lan-manager/public")
     args = parser.parse_args()
     if args.discovery_auto and args.source_address:
         parser.error("--discovery-auto cannot be combined with --source-address")
@@ -114,12 +116,12 @@ def main() -> int:
                               directory=LocalServiceDirectory(hello),
                               address_book=args.addressbook_file,
                               remote_catalog=RemoteDirectoryCache(
-                                  args.catalog_file))
+                                  path=args.catalog_file))
     except (ValueError, OSError) as error:
         logging.error("Startup failed: %s", error)
         return 1
     app = QApplication(sys.argv[:1])
-    window = MainWindow(service)
+    window = MainWindow(service, portal_public_dir=args.public_dir)
     window.show()
     service.start()
     try:

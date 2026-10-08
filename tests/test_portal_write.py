@@ -386,3 +386,24 @@ def test_portal_accepts_multipart_file_upload(tmp_path) -> None:
     finally:
         portal.stop()
         assert portal.join(3)
+
+
+def test_portal_lifecycle_with_registry_dir(tmp_path) -> None:
+    hello = _hello()
+    service = ChatService(hello)
+    portal = PortalServer(hello, service.peer_repository, None,
+                          service.message_journal, None,
+                          registry_root=tmp_path, allow_loopback=True)
+    state = portal.start("127.0.0.1", 0)
+    assert state.phase == "running"
+    portal.stop()
+    assert portal.join(3)
+
+
+def test_service_guest_room_send_journals_without_peers() -> None:
+    hello = _hello()
+    service = ChatService(hello)
+    message_id = service.send_guest_room("Phone", "hello")
+    assert message_id
+    texts = [entry.text for entry in service.message_journal.snapshot().entries]
+    assert texts == ["Guest Phone: hello"]

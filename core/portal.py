@@ -15,12 +15,13 @@ import threading
 import time
 from collections import OrderedDict
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from core.discovery import Hello
 from core.message_journal import MessageJournal
 from core.peer_repository import PeerRepository
+from core.public_files import MAX_FILE_BYTES, PublicFileRegistry
 from core.services import (DirectoryEntry, DirectoryKind, LocalServiceDirectory,
                            browser_url)
 from core.storage import PostStore
@@ -153,7 +154,8 @@ class PortalContent:
                  posts: PostStore | None,
                  messages: MessageJournal | None = None,
                  directory: LocalServiceDirectory | None = None,
-                 room_sender: Any | None = None) -> None:
+                 room_sender: Any | None = None,
+                 registry_root: Any | None = None) -> None:
         self.hello = hello
         self.peers = peers
         self.posts = posts
@@ -161,6 +163,7 @@ class PortalContent:
         self.directory_store = directory or LocalServiceDirectory(hello)
         self.room_sender = room_sender
         self.guests = GuestStore()
+        self.files = PublicFileRegistry(registry_root) if registry_root is not None else None
         self._chat_last: dict[str, float] = {}
         self._chat_lock = threading.Lock()
 
@@ -320,10 +323,27 @@ class PortalContent:
 
     def unavailable(self, kind: str) -> dict[str, Any]:
         """Return an honest empty result for a service without a core registry."""
+        if kind == "files" and self.files is not None:
+            return {"available": True, "items": self.files.list(),
+                    "scope": "public_explicit"}
         reasons = {
             "files": "No files have been explicitly published for browser access.",
         }
         return {"available": False, "items": [], "reason": reasons[kind]}
+
+    def publish_file(self, filename: object, display_name: object,
+                     data: bytes, cookie: str | None) -> tuple[dict[str, Any], str | None]:
+        """Publish one explicit public file from an open LAN guest."""
+        if self.files is None:
+            raise RuntimeError("public files are not configured")
+        if not isinstance(data, bytes) or not data:
+            raise ValueError("file body must not be empty")
+        name = _validate_display_name(display_name)
+        guest_id, set_cookie = self.guests.claim(name, cookie)
+        entry = self.files.publish(filename, data, guest=name)
+        header = (f"guest_id={guest_id}; Path=/; HttpOnly; SameSite=Lax"
+                  if set_cookie else None)
+        return entry, header
 
 
 class _PortalHttpServer(HTTPServer):
@@ -363,6 +383,9 @@ class _PortalHandler(BaseHTTPRequestHandler):
         if path == "/api/feed/post":
             self._handle_post_feed()
             return
+        if path == "/api/files/upload":
+            self._handle_post_file()
+            return
         self._method_not_allowed()
 
     def do_PUT(self) -> None:
@@ -389,35 +412,41 @@ class _PortalHandler(BaseHTTPRequestHandler):
 
     def _handle(self, include_body: bool) -> None:
         try:
-            status, content_type, body = self._route()
+            status, content_type, body, extra = self._route()
         except (OSError, TypeError, ValueError) as error:
             logging.exception("Portal request failed: %s", error)
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             content_type = "application/json; charset=utf-8"
             body = _json_bytes({"error": "Portal snapshot unavailable."})
-        self._send(status, content_type, body, include_body)
+            extra = None
+        self._send(status, content_type, body, include_body, extra)
 
-    def _route(self) -> tuple[HTTPStatus, str, bytes]:
-        path = urlsplit(self.path).path.rstrip("/") or "/"
+    def _route(self) -> tuple[HTTPStatus, str, bytes, dict[str, str] | None]:
+        split = urlsplit(self.path)
+        path = split.path.rstrip("/") or "/"
         if path == "/api/status":
-            return _json_response(self.server.content.status())
+            return (*_json_response(self.server.content.status()), None)
         if path == "/api/feed":
-            return _json_response(self.server.content.feed())
+            return (*_json_response(self.server.content.feed()), None)
         if path == "/api/messages":
-            return _json_response(self.server.content.messages())
+            return (*_json_response(self.server.content.messages()), None)
+        if path == "/api/files/list":
+            return (*_json_response(self.server.content.unavailable("files")), None)
+        if path == "/api/files/download":
+            return self._serve_download(parse_qs(split.query).get("id", [""])[0])
         if path == "/api/services":
-            return _json_response(self.server.content.directory(
-                DirectoryKind.SERVICE))
+            return (*_json_response(self.server.content.directory(
+                DirectoryKind.SERVICE)), None)
         if path == "/api/games":
-            return _json_response(self.server.content.directory(
-                DirectoryKind.GAME))
+            return (*_json_response(self.server.content.directory(
+                DirectoryKind.GAME)), None)
         api_kinds = {"/api/files": "files"}
         if path in api_kinds:
-            return _json_response(self.server.content.unavailable(api_kinds[path]))
+            return (*_json_response(self.server.content.unavailable(api_kinds[path])), None)
         if path in {"/", "/files", "/chat", "/feed", "/services", "/games"}:
             body = _render_page(path, self.server.content).encode("utf-8")
-            return HTTPStatus.OK, "text/html; charset=utf-8", body
-        return _json_response({"error": "Not found."}, HTTPStatus.NOT_FOUND)
+            return HTTPStatus.OK, "text/html; charset=utf-8", body, None
+        return (*_json_response({"error": "Not found."}, HTTPStatus.NOT_FOUND), None)
 
     def _method_not_allowed(self) -> None:
         body = _json_bytes({
@@ -518,6 +547,74 @@ class _PortalHandler(BaseHTTPRequestHandler):
         extra = {"Set-Cookie": set_cookie} if set_cookie else None
         self._send_json(HTTPStatus.OK, {"post_id": post_id}, extra)
 
+    def _handle_post_file(self) -> None:
+        content = self.server.content
+        if content.files is None:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "Public files are not configured."})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Content length invalid."})
+            return
+        if length <= 0 or length > MAX_FILE_BYTES:
+            code = HTTPStatus.REQUEST_ENTITY_TOO_LARGE if length > MAX_FILE_BYTES else HTTPStatus.BAD_REQUEST
+            self._send_json(code, {"error": "File body outside allowed range."})
+            return
+        try:
+            data = self.rfile.read(length)
+        except (OSError, ValueError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "File body unreadable."})
+            return
+        if len(data) != length:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "File body truncated."})
+            return
+        try:
+            entry, set_cookie = content.publish_file(
+                self.headers.get("X-Filename"),
+                self.headers.get("X-Display-Name", "guest"),
+                data, self.headers.get("Cookie"))
+        except ValueError as error:
+            text = str(error) or "Invalid file upload."
+            if "exceeds 64" in text:
+                self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": text})
+            elif "already published" in text or "full" in text:
+                self._send_json(HTTPStatus.CONFLICT, {"error": text})
+            else:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": text})
+            return
+        except RuntimeError as error:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": str(error) or "Public files unavailable."})
+            return
+        extra = {"Set-Cookie": set_cookie} if set_cookie else None
+        self._send_json(HTTPStatus.OK, entry, extra)
+
+    def _serve_download(self, file_id: str) -> tuple[HTTPStatus, str, bytes, dict[str, str] | None]:
+        content = self.server.content
+        if content.files is None:
+            return (*_json_response({"error": "Public files are not configured."},
+                                    HTTPStatus.SERVICE_UNAVAILABLE), None)
+        try:
+            path, digest = content.files.open_file(file_id)
+        except ValueError as error:
+            text = str(error) or "Invalid file request."
+            if "unknown" in text or "no longer" in text:
+                return (*_json_response({"error": text}, HTTPStatus.NOT_FOUND), None)
+            if "mismatch" in text:
+                return (*_json_response({"error": text},
+                                        HTTPStatus.INTERNAL_SERVER_ERROR), None)
+            return (*_json_response({"error": text}, HTTPStatus.BAD_REQUEST), None)
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return (*_json_response({"error": "File is no longer available."},
+                                    HTTPStatus.NOT_FOUND), None)
+        extra = {"X-SHA256": digest,
+                 "Content-Disposition": f'attachment; filename="{path.name}"'}
+        return HTTPStatus.OK, "application/octet-stream", data, extra
+
     def _send_json(self, status: HTTPStatus, value: dict[str, Any],
                    extra: dict[str, str] | None = None) -> None:
         self._send(status, "application/json; charset=utf-8",
@@ -556,9 +653,10 @@ class PortalServer:
                  messages: MessageJournal | None = None,
                  directory: LocalServiceDirectory | None = None,
                  room_sender: Any | None = None,
+                 registry_root: Any | None = None,
                  allow_loopback: bool = False) -> None:
         self.content = PortalContent(hello, peers, posts, messages, directory,
-                                     room_sender)
+                                     room_sender, registry_root)
         self.allow_loopback = allow_loopback
         self._lock = threading.Lock()
         self._stop = threading.Event()

@@ -190,3 +190,80 @@ def test_portal_feed_rejects_oversize_and_empty(tmp_path) -> None:
     finally:
         portal.stop()
         assert portal.join(3)
+
+
+def _upload(port: int, filename: str, data: bytes,
+            cookie: str | None = None) -> tuple[int, dict[str, str], bytes]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        headers = {"Content-Type": "application/octet-stream",
+                   "Content-Length": str(len(data)),
+                   "X-Filename": filename, "X-Display-Name": "Phone"}
+        if cookie is not None:
+            headers["Cookie"] = cookie
+        connection.request("POST", "/api/files/upload", body=data, headers=headers)
+        response = connection.getresponse()
+        payload = response.read()
+        return response.status, {name.lower(): value
+                                 for name, value in response.getheaders()}, payload
+    finally:
+        connection.close()
+
+
+def test_portal_files_upload_list_download(tmp_path) -> None:
+    hello = _hello()
+    service = ChatService(hello)
+    portal = PortalServer(hello, service.peer_repository, None,
+                          service.message_journal, None,
+                          registry_root=tmp_path / "public",
+                          allow_loopback=True)
+    state = portal.start("127.0.0.1", 0)
+    assert state.port is not None
+    try:
+        status, _, body = _upload(state.port, "notes.txt", b"hello public")
+        assert status == 200
+        entry = json.loads(body)
+        assert entry["name"] == "notes.txt"
+        assert len(entry["sha256"]) == 64
+        connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=2)
+        try:
+            connection.request("GET", "/api/files/list")
+            listing = json.loads(connection.getresponse().read())
+        finally:
+            connection.close()
+        assert listing["available"] is True
+        assert [item["name"] for item in listing["items"]] == ["notes.txt"]
+        connection = http.client.HTTPConnection("127.0.0.1", state.port, timeout=2)
+        try:
+            connection.request("GET", "/api/files/download?id=notes.txt")
+            response = connection.getresponse()
+            data = response.read()
+            digest = response.getheader("X-SHA256")
+        finally:
+            connection.close()
+        assert data == b"hello public"
+        assert digest == entry["sha256"]
+    finally:
+        portal.stop()
+        assert portal.join(3)
+
+
+def test_portal_files_reject_traversal_and_oversize(tmp_path) -> None:
+    hello = _hello()
+    service = ChatService(hello)
+    portal = PortalServer(hello, service.peer_repository, None,
+                          service.message_journal, None,
+                          registry_root=tmp_path / "public",
+                          allow_loopback=True)
+    state = portal.start("127.0.0.1", 0)
+    assert state.port is not None
+    try:
+        status, _, _ = _upload(state.port, "../../x", b"a")
+        assert status == 400
+        status, _, _ = _upload(state.port, "dup.txt", b"1")
+        assert status == 200
+        status, _, _ = _upload(state.port, "dup.txt", b"2")
+        assert status == 409
+    finally:
+        portal.stop()
+        assert portal.join(3)

@@ -10,7 +10,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Address, ip_address
 import json
 import logging
+import secrets
 import threading
+import time
+from collections import OrderedDict
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -24,6 +27,100 @@ from core.storage import PostStore
 PORTAL_PORT = 8080
 REQUEST_TIMEOUT = 2.0
 PAGE_LIMIT = 50
+MAX_GUESTS = 128
+GUEST_TTL_S = 86400.0
+MAX_DISPLAY_NAME = 64
+
+
+class GuestStore:
+    """Bound open-LAN guest sessions keyed by random cookie value."""
+
+    def __init__(self) -> None:
+        self._guests: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def claim(self, display_name: str, cookie: str | None) -> tuple[str, str]:
+        """Claim or refresh one guest session for an open LAN browser."""
+        name = _validate_display_name(display_name)
+        now = time.monotonic()
+        with self._lock:
+            self._expire(now)
+            existing = _extract_guest_id(cookie)
+            if existing is not None and existing in self._guests:
+                self._guests[existing] = (name, now)
+                self._guests.move_to_end(existing)
+                return existing, ""
+            guest_id = secrets.token_hex(16)
+            while guest_id in self._guests:
+                guest_id = secrets.token_hex(16)
+            self._guests[guest_id] = (name, now)
+            while len(self._guests) > MAX_GUESTS:
+                self._guests.popitem(last=False)
+            return guest_id, f"guest_id={guest_id}; Path=/; HttpOnly; SameSite=Lax"
+
+    def resolve(self, cookie: str | None) -> str | None:
+        """Return the live guest ID for a cookie header, if present."""
+        guest_id = _extract_guest_id(cookie)
+        if guest_id is None:
+            return None
+        with self._lock:
+            entry = self._guests.get(guest_id)
+            if entry is None:
+                return None
+            name, _ = entry
+            now = time.monotonic()
+            self._expire(now)
+            if guest_id not in self._guests:
+                return None
+            self._guests[guest_id] = (name, now)
+            self._guests.move_to_end(guest_id)
+            return guest_id
+
+    def display(self, guest_id: str) -> str:
+        """Return the display label for one live guest."""
+        with self._lock:
+            return self._guests[guest_id][0]
+
+    def identity(self, guest_id: str) -> str:
+        """Guests are never authenticated, even when names collide."""
+        with self._lock:
+            self._guests[guest_id]
+            return "unverified_guest"
+
+    def _expire(self, now: float) -> None:
+        stale = [key for key, (_, seen) in self._guests.items()
+                 if now - seen > GUEST_TTL_S]
+        for key in stale:
+            del self._guests[key]
+
+
+def _validate_display_name(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("display name must be text")
+    name = value.strip()
+    if not name or len(name) > MAX_DISPLAY_NAME:
+        raise ValueError("display name must contain 1 to 64 characters")
+    if any(ord(char) < 32 or char == "\x7f" for char in name):
+        raise ValueError("display name contains control characters")
+    return name
+
+
+def _extract_guest_id(cookie: object) -> str | None:
+    if not isinstance(cookie, str) or not cookie:
+        return None
+    for part in cookie.split(";"):
+        item = part.strip()
+        if item.startswith("guest_id="):
+            candidate = item[len("guest_id="):].strip()
+            if len(candidate) == 32 and all(
+                    char in "0123456789abcdef" for char in candidate):
+                return candidate
+            return None
+    bare = cookie.strip()
+    if len(bare) == 32 and all(
+            char in "0123456789abcdef" for char in bare):
+        return bare
+    return None
 
 
 @dataclass(frozen=True)

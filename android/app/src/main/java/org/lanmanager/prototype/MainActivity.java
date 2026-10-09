@@ -759,6 +759,74 @@ public class MainActivity extends Activity {
         Frames.send(socket.getOutputStream(), reply.toString());
     }
 
+    private void send_chat(PeerSnapshot peer, String scope, String text) {
+        Session session = current;
+        if (session == null || !session.running || peer == null
+                || !peer.has_capability("chat_v1")) {
+            return;
+        }
+        String clean;
+        try {
+            clean = ChatRules.requireText(text);
+        } catch (IllegalArgumentException error) {
+            report(session, getString(R.string.chat_invalid_text));
+            return;
+        }
+        ChatEntry entry = new ChatEntry("out", scope, clean,
+            getString(R.string.this_device), "queued");
+        synchronized (session.chat_history) {
+            session.chat_history.add(entry);
+            while (session.chat_history.size() > ChatRules.MAX_HISTORY) {
+                session.chat_history.remove(0);
+            }
+        }
+        update_chat_ui(session);
+        try {
+            session.workers.execute(() -> deliver_chat(session, entry, peer, scope, clean));
+        } catch (RejectedExecutionException error) {
+            entry.state = "failed";
+            update_chat_ui(session);
+        }
+    }
+
+    private void deliver_chat(Session session, ChatEntry entry, PeerSnapshot peer,
+                              String scope, String text) {
+        try (Socket socket = new Socket()) {
+            session.sockets.add(socket);
+            try {
+                socket.connect(new InetSocketAddress(peer.ip, peer.tcp_port), 3000);
+                JSONObject body = new JSONObject()
+                    .put("scope", scope).put("text", text);
+                if ("dm".equals(scope)) body.put("to_session", peer.session_id);
+                JSONObject request = message(session, "CHAT", body);
+                Frames.send(socket.getOutputStream(), request.toString());
+                JSONObject reply = receive(socket, 5000);
+                String reply_to = reply == null ? null : reply.optString("reply_to", null);
+                if (reply != null && "ACK".equals(reply.getString("type"))
+                        && ChatRules.matchesAck(
+                            request.getString("message_id"), reply_to)) {
+                    entry.state = "accepted";
+                } else {
+                    entry.state = "uncertain";
+                    report(session, getString(R.string.chat_unaccepted, peer.name));
+                }
+            } finally {
+                session.sockets.remove(socket);
+            }
+        } catch (Exception error) {
+            entry.state = "failed";
+            report(session, getString(R.string.chat_failed, error));
+        }
+        update_chat_ui(session);
+    }
+
+    private void update_chat_ui(Session session) {
+        runOnUiThread(() -> {
+            if (session != null && current != session) return;
+            if (session == null && current != null) return;
+        });
+    }
+
     private void choose_file_to_send() {
         Session session = current;
         PeerSnapshot peer = selected_peer;

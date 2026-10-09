@@ -37,8 +37,15 @@ public final class ChatRulesTest {
         assertFalse(ChatRules.acceptableDm(null, local));
     }
 
-    @Test public void duplicate_message_id_is_dropped() {
-        ChatRules.ChatDedupe seen = new ChatRules.ChatDedupe();
+    @Test public void ack_must_match_sent_id() {
+        String sent = "00000000-0000-4000-8000-000000000001";
+        String other = "00000000-0000-4000-8000-000000000002";
+        assertTrue(ChatRules.matchesAck(sent, sent));
+        assertFalse(ChatRules.matchesAck(sent, other));
+        assertFalse(ChatRules.matchesAck(sent, null));
+    }
+
+    @Test public void duplicate_message_id_is_dropped() {        ChatRules.ChatDedupe seen = new ChatRules.ChatDedupe();
         String session = "00000000-0000-4000-8000-000000000001";
         String message = "00000000-0000-4000-8000-000000000003";
         assertTrue(seen.fresh(session, message));

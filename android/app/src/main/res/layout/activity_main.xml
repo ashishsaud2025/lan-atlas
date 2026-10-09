@@ -266,6 +266,53 @@
         </ScrollView>
 
         <ScrollView
+            android:id="@+id/page_chat"
+            android:layout_width="match_parent" android:layout_height="match_parent"
+            android:fillViewport="true" android:visibility="gone">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:padding="16dp">
+                <TextView style="@style/Widget.LanAtlas.Title"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="@string/chat_title" />
+                <TextView style="@style/Widget.LanAtlas.Subtitle"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginBottom="12dp" android:text="@string/chat_subtitle" />
+                <LinearLayout style="@style/Widget.LanAtlas.Card"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                    <TextView android:id="@+id/chat_peer_label" style="@style/Widget.LanAtlas.Label"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:text="@string/no_selected_device" />
+                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:orientation="horizontal">
+                        <Button android:id="@+id/chat_scope_room" style="@style/Widget.LanAtlas.Button.Primary"
+                            android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_weight="1" android:text="@string/chat_room" />
+                        <Button android:id="@+id/chat_scope_dm" style="@style/Widget.LanAtlas.Button"
+                            android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp" android:layout_weight="1"
+                            android:text="@string/chat_dm" />
+                    </LinearLayout>
+                    <TextView android:id="@+id/chat_history" style="@style/Widget.LanAtlas.Card"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:fontFamily="monospace"
+                        android:minHeight="180dp" android:text="@string/chat_empty"
+                        android:textColor="?attr/lanPrimaryText" android:textIsSelectable="true"
+                        android:textSize="12sp" />
+                    <EditText android:id="@+id/chat_input" style="@style/Widget.LanAtlas.Input"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:hint="@string/chat_hint"
+                        android:importantForAutofill="no" android:inputType="textMultiLine"
+                        android:maxLength="2000" android:minLines="2" />
+                    <Button android:id="@+id/chat_send" style="@style/Widget.LanAtlas.Button.Primary"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:enabled="false"
+                        android:text="@string/chat_send" />
+                </LinearLayout>
+            </LinearLayout>
+        </ScrollView>
+
+        <ScrollView
             android:id="@+id/page_more"
             android:layout_width="match_parent" android:layout_height="match_parent"
             android:fillViewport="true" android:visibility="gone">
@@ -345,6 +392,9 @@
         <Button android:id="@+id/nav_workbench" style="@style/Widget.LanAtlas.NavButton"
             android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
             android:text="@string/workbench" />
+        <Button android:id="@+id/nav_chat" style="@style/Widget.LanAtlas.NavButton"
+            android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+            android:text="@string/chat" />
         <Button android:id="@+id/nav_more" style="@style/Widget.LanAtlas.NavButton"
             android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
             android:text="@string/more" />

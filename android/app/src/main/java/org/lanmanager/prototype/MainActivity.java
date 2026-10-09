@@ -78,7 +78,8 @@ public class MainActivity extends Activity {
     private static final int PAGE_NETWORK = 1;
     private static final int PAGE_DEVICES = 2;
     private static final int PAGE_WORKBENCH = 3;
-    private static final int PAGE_MORE = 4;
+    private static final int PAGE_CHAT = 4;
+    private static final int PAGE_MORE = 5;
     private static final int REQUEST_OPEN_FILE = 100;
     private static final int REQUEST_CREATE_FILE = 101;
     private static final int VERIFY_TIMEOUT_MS = 300000;
@@ -99,6 +100,13 @@ public class MainActivity extends Activity {
     private TextView empty_devices;
     private TextView device_limit_note;
     private TextView transfer_status;
+    private TextView chat_peer_label;
+    private TextView chat_history;
+    private EditText chat_input;
+    private Button chat_scope_room;
+    private Button chat_scope_dm;
+    private Button chat_send;
+    private boolean chat_dm;
     private LinearLayout device_list;
     private ObservedTopologyView topology_view;
     private ProgressBar transfer_progress;
@@ -208,6 +216,9 @@ public class MainActivity extends Activity {
         findViewById(R.id.start_button).setOnClickListener(view -> start_session());
         findViewById(R.id.stop_button).setOnClickListener(view -> stop_session());
         probe_button.setOnClickListener(view -> probe());
+        chat_scope_room.setOnClickListener(view -> choose_chat_scope(false));
+        chat_scope_dm.setOnClickListener(view -> choose_chat_scope(true));
+        chat_send.setOnClickListener(view -> send_chat_from_composer());
         send_file_button.setOnClickListener(view -> choose_file_to_send());
         accept_file_button.setOnClickListener(view -> accept_incoming_file());
         decline_file_button.setOnClickListener(view -> decline_incoming_file());
@@ -239,6 +250,12 @@ public class MainActivity extends Activity {
         empty_devices = findViewById(R.id.empty_devices);
         device_limit_note = findViewById(R.id.device_limit_note);
         transfer_status = findViewById(R.id.transfer_status);
+        chat_peer_label = findViewById(R.id.chat_peer_label);
+        chat_history = findViewById(R.id.chat_history);
+        chat_input = findViewById(R.id.chat_input);
+        chat_scope_room = findViewById(R.id.chat_scope_room);
+        chat_scope_dm = findViewById(R.id.chat_scope_dm);
+        chat_send = findViewById(R.id.chat_send);
         device_list = findViewById(R.id.device_list);
         topology_view = findViewById(R.id.topology_view);
         transfer_progress = findViewById(R.id.transfer_progress);
@@ -249,10 +266,11 @@ public class MainActivity extends Activity {
         cancel_transfer_button = findViewById(R.id.cancel_transfer_button);
         pages = new View[]{findViewById(R.id.page_overview), findViewById(R.id.page_network),
             findViewById(R.id.page_devices), findViewById(R.id.page_workbench),
-            findViewById(R.id.page_more)};
+            findViewById(R.id.page_chat), findViewById(R.id.page_more)};
         navigation = new Button[]{findViewById(R.id.nav_overview),
             findViewById(R.id.nav_network), findViewById(R.id.nav_devices),
-            findViewById(R.id.nav_workbench), findViewById(R.id.nav_more)};
+            findViewById(R.id.nav_workbench), findViewById(R.id.nav_chat),
+            findViewById(R.id.nav_more)};
     }
 
     private void setup_navigation() {
@@ -557,12 +575,13 @@ public class MainActivity extends Activity {
                     selected_port = refreshed.tcp_port;
                     host_input.setText(refreshed.ip);
                     probe_button.setEnabled(refreshed.has_capability("echo_v1"));
-                    send_file_button.setEnabled(session.transfer == null
+                    send_file_button.setEnabled(session != null && session.transfer == null
                         && refreshed.has_capability("file_v1"));
                     selected_target.setText(getString(R.string.selected_target_format,
                         refreshed.name, refreshed.ip, refreshed.tcp_port));
                 }
             }
+            update_chat_ui(session);
         });
     }
 
@@ -575,6 +594,7 @@ public class MainActivity extends Activity {
         send_file_button.setEnabled(peer.has_capability("file_v1"));
         selected_target.setText(getString(R.string.selected_target_format,
             peer.name, peer.ip, peer.tcp_port));
+        update_chat_ui(current);
         show_page(PAGE_WORKBENCH);
     }
 
@@ -754,6 +774,7 @@ public class MainActivity extends Activity {
             }
             report(session, "Chat " + scope + " from " + sender);
         }
+        update_chat_ui(session);
         JSONObject reply = message(session, "ACK", new JSONObject().put("status", "accepted"));
         reply.put("reply_to", request.getString("message_id"));
         Frames.send(socket.getOutputStream(), reply.toString());
@@ -820,10 +841,55 @@ public class MainActivity extends Activity {
         update_chat_ui(session);
     }
 
+    private void choose_chat_scope(boolean dm) {
+        chat_dm = dm;
+        chat_scope_room.setSelected(!dm);
+        chat_scope_dm.setSelected(dm);
+        update_chat_ui(current);
+    }
+
+    private void send_chat_from_composer() {
+        Session session = current;
+        PeerSnapshot peer = selected_peer;
+        if (session == null || peer == null) return;
+        String text = chat_input.getText().toString();
+        if (!ChatRules.validText(text)) {
+            chat_input.setError(getString(R.string.chat_invalid_text));
+            return;
+        }
+        chat_input.setError(null);
+        chat_input.setText("");
+        send_chat(peer, chat_dm ? "dm" : "room", text);
+    }
+
     private void update_chat_ui(Session session) {
         runOnUiThread(() -> {
             if (session != null && current != session) return;
             if (session == null && current != null) return;
+            Session active = current;
+            PeerSnapshot peer = selected_peer;
+            boolean live = active != null && active.running && peer != null
+                && peer.has_capability("chat_v1");
+            if (peer == null) {
+                chat_peer_label.setText(R.string.no_selected_device);
+            } else {
+                chat_peer_label.setText(getString(R.string.selected_target_format,
+                    peer.name, peer.ip, peer.tcp_port));
+            }
+            chat_send.setEnabled(live);
+            StringBuilder history = new StringBuilder();
+            if (active != null) {
+                synchronized (active.chat_history) {
+                    for (ChatEntry entry : active.chat_history) {
+                        history.append(entry.sender).append(" [")
+                            .append(entry.scope).append(", ")
+                            .append(entry.state).append("] ");
+                        history.append(entry.text).append('\n');
+                    }
+                }
+            }
+            chat_history.setText(history.length() == 0
+                ? getString(R.string.chat_empty) : history.toString());
         });
     }
 

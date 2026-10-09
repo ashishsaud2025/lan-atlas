@@ -9,6 +9,14 @@
     <string name="network">Network</string>
     <string name="devices">Devices</string>
     <string name="workbench">Workbench</string>
+    <string name="chat">Chat</string>
+    <string name="chat_title">Room and direct messages</string>
+    <string name="chat_subtitle">Send plaintext chat to a selected session advertising chat_v1. Senders are unverified.</string>
+    <string name="chat_room">Room</string>
+    <string name="chat_dm">DM</string>
+    <string name="chat_hint">Message up to 2000 characters</string>
+    <string name="chat_send">Send message</string>
+    <string name="chat_empty">No messages yet</string>
     <string name="more">More</string>
     <string name="local_overview">Local network overview</string>
     <string name="overview_subtitle">Start an explicit foreground session to announce discovery and host ECHO.</string>
@@ -48,7 +56,7 @@
     <string name="probe_running">Running 4-vector ECHO compatibility test…</string>
     <string name="probe_success">Compatible · 4/4 vectors verified</string>
     <string name="activity">Activity</string>
-    <string name="activity_subtitle">Bounded operational events. Human communication is not implemented on Android yet.</string>
+    <string name="activity_subtitle">Bounded operational events plus chat history for this session.</string>
     <string name="settings">Settings</string>
     <string name="appearance">Appearance</string>
     <string name="observatory_dark">Observatory Dark</string>
@@ -57,7 +65,7 @@
     <string name="session_id">Session ID</string>
     <string name="no_active_session">No active session</string>
     <string name="protocol_ports">UDP discovery 50000 · TCP ECHO 50002</string>
-    <string name="prototype_scope">This Android prototype supports discovery, ECHO, and one bidirectional file transfer at a time. Messages and posts are not implemented on Android yet.</string>
+    <string name="prototype_scope">This Android prototype supports discovery, ECHO, one bidirectional file transfer at a time, and room plus DM chat. Posts are not implemented on Android yet.</string>
     <string name="lifecycle_explanation">Networking stops when this activity leaves the foreground. Returning does not silently restart it.</string>
     <string name="name_error">Name must contain 1 to 80 characters</string>
     <string name="probe_input_error">Start networking and enter a target host</string>

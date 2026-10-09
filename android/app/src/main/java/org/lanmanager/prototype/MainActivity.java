@@ -179,7 +179,7 @@ public class MainActivity extends Activity {
         WifiManager.MulticastLock wifi_lock;
         final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
         final ThreadPoolExecutor workers = new ThreadPoolExecutor(
-            4, 4, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(4));
+            8, 8, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(8));
     }
 
     private static final class ChatEntry {
@@ -653,7 +653,8 @@ public class MainActivity extends Activity {
                 }
                 session.sockets.add(socket);
                 try {
-                    session.workers.execute(() -> handle_connection(session, socket));
+                    session.workers.execute(() -> handle_connection(
+                        session, socket, ChatRules.ECHO_PORT));
                 } catch (RejectedExecutionException error) {
                     session.sockets.remove(socket);
                     try {
@@ -692,7 +693,8 @@ public class MainActivity extends Activity {
                 }
                 session.sockets.add(socket);
                 try {
-                    session.workers.execute(() -> handle_connection(session, socket));
+                    session.workers.execute(() -> handle_connection(
+                        session, socket, ChatRules.CHAT_PORT));
                 } catch (RejectedExecutionException error) {
                     session.sockets.remove(socket);
                     try {
@@ -710,7 +712,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void handle_connection(Session session, Socket socket) {
+    private void handle_connection(Session session, Socket socket, int port) {
         try (socket) {
             JSONObject request = receive(socket);
             if (request == null) return;
@@ -719,6 +721,7 @@ public class MainActivity extends Activity {
                 return;
             }
             if ("CHAT".equals(request.getString("type"))) {
+                if (!ChatRules.acceptsChat(port)) throw new IOException("CHAT needs the chat port");
                 receive_chat(session, socket, request);
                 return;
             }
@@ -823,9 +826,11 @@ public class MainActivity extends Activity {
                 Frames.send(socket.getOutputStream(), request.toString());
                 JSONObject reply = receive(socket, 5000);
                 String reply_to = reply == null ? null : reply.optString("reply_to", null);
+                String reply_peer = reply == null ? null : reply.optString("peer_id", null);
+                String reply_session = reply == null ? null : reply.optString("session_id", null);
                 if (reply != null && "ACK".equals(reply.getString("type"))
-                        && ChatRules.matchesAck(
-                            request.getString("message_id"), reply_to)) {
+                        && ChatRules.matchesAck(request.getString("message_id"), reply_to,
+                            reply_peer, reply_session, peer.peer_id, peer.session_id)) {
                     entry.state = "accepted";
                 } else {
                     entry.state = "uncertain";
@@ -851,7 +856,11 @@ public class MainActivity extends Activity {
     private void send_chat_from_composer() {
         Session session = current;
         PeerSnapshot peer = selected_peer;
-        if (session == null || peer == null) return;
+        if (session == null || !session.running || peer == null
+                || !peer.has_capability("chat_v1")) {
+            report(session, getString(R.string.chat_no_peer));
+            return;
+        }
         String text = chat_input.getText().toString();
         if (!ChatRules.validText(text)) {
             chat_input.setError(getString(R.string.chat_invalid_text));

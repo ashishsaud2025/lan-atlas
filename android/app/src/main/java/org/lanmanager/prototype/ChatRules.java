@@ -15,13 +15,14 @@ public final class ChatRules {
     private ChatRules() {}
 
     public static boolean validText(String value) {
-        if (value == null || value.isBlank() || value.length() > MAX_TEXT) return false;
-        return true;
+        if (value == null || value.length() > MAX_TEXT) return false;
+        return !value.codePoints().allMatch(character ->
+            Character.isWhitespace(character) || Character.isSpaceChar(character));
     }
 
     public static String requireText(String value) {
         if (!validText(value)) throw new IllegalArgumentException("Invalid chat text");
-        return value.strip();
+        return value;
     }
 
     public static boolean validIncomingText(String value) {
@@ -34,9 +35,16 @@ public final class ChatRules {
         return toSession.equals(localSession);
     }
 
-    public static boolean matchesAck(String sentId, String replyTo) {
-        if (sentId == null || replyTo == null) return false;
-        return sentId.equals(replyTo);
+    public static boolean acceptsChat(int port) {
+        return port == CHAT_PORT;
+    }
+
+    public static boolean matchesAck(String sentId, String replyTo, String replyPeerId,
+                                     String replySessionId, String peerId, String sessionId) {
+        if (sentId == null || replyTo == null || replyPeerId == null
+                || replySessionId == null || peerId == null || sessionId == null) return false;
+        return sentId.equals(replyTo) && replyPeerId.equals(peerId)
+            && replySessionId.equals(sessionId);
     }
 
     /** Bounded duplicate tracker keyed by sender session plus message ID. */

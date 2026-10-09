@@ -99,6 +99,7 @@
     <string name="transfer_peer_unavailable">Selected session is no longer available</string>
     <string name="transfer_failed">Transfer failed: %1$s</string>
     <string name="chat_invalid_text">Message must contain 1 to 2000 characters</string>
+    <string name="chat_no_peer">Select a session advertising chat_v1 first</string>
     <string name="chat_failed">Message failed: %1$s</string>
     <string name="chat_unaccepted">No acceptance from %1$s · marked uncertain</string>
     <string name="transfer_sent">Verified by receiver · %1$s</string>

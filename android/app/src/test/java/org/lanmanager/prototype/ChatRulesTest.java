@@ -11,11 +11,12 @@ public final class ChatRulesTest {
         assertTrue(ChatRules.validText("hi"));
         assertFalse(ChatRules.validText("  "));
         assertFalse(ChatRules.validText(null));
+        assertFalse(ChatRules.validText("\u00a0"));
         assertFalse(ChatRules.validText("x".repeat(2001)));
     }
 
-    @Test public void require_text_strips_and_rejects() {
-        assertEquals("hi", ChatRules.requireText("  hi  "));
+    @Test public void require_text_rejects_without_stripping() {
+        assertEquals("  hi  ", ChatRules.requireText("  hi  "));
         try {
             ChatRules.requireText("   ");
             assertFalse("blank text must throw", true);
@@ -37,12 +38,21 @@ public final class ChatRulesTest {
         assertFalse(ChatRules.acceptableDm(null, local));
     }
 
+    @Test public void chat_only_on_chat_port() {
+        assertTrue(ChatRules.acceptsChat(ChatRules.CHAT_PORT));
+        assertFalse(ChatRules.acceptsChat(ChatRules.ECHO_PORT));
+    }
+
     @Test public void ack_must_match_sent_id() {
         String sent = "00000000-0000-4000-8000-000000000001";
         String other = "00000000-0000-4000-8000-000000000002";
-        assertTrue(ChatRules.matchesAck(sent, sent));
-        assertFalse(ChatRules.matchesAck(sent, other));
-        assertFalse(ChatRules.matchesAck(sent, null));
+        String peer = "00000000-0000-4000-8000-000000000003";
+        String session = "00000000-0000-4000-8000-000000000004";
+        assertTrue(ChatRules.matchesAck(sent, sent, peer, session, peer, session));
+        assertFalse(ChatRules.matchesAck(sent, other, peer, session, peer, session));
+        assertFalse(ChatRules.matchesAck(sent, sent, other, session, peer, session));
+        assertFalse(ChatRules.matchesAck(sent, sent, peer, other, peer, session));
+        assertFalse(ChatRules.matchesAck(sent, null, peer, session, peer, session));
     }
 
     @Test public void duplicate_message_id_is_dropped() {        ChatRules.ChatDedupe seen = new ChatRules.ChatDedupe();

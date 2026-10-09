@@ -159,8 +159,10 @@ public class MainActivity extends Activity {
         volatile boolean running = true;
         volatile boolean discovery_active;
         volatile boolean echo_active;
+        volatile boolean chat_active;
         volatile DatagramSocket udp;
         volatile ServerSocket listener;
+        volatile ServerSocket chat_listener;
         volatile TransferTask transfer;
         WifiManager.MulticastLock wifi_lock;
         final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
@@ -288,6 +290,7 @@ public class MainActivity extends Activity {
         report(session, getString(R.string.started_session, short_id(session.id)));
         session.workers.execute(() -> discovery(session, name));
         session.workers.execute(() -> echo_server(session));
+        session.workers.execute(() -> chat_server(session));
     }
 
     private void stop_session() {
@@ -307,6 +310,11 @@ public class MainActivity extends Activity {
                 if (session.listener != null) session.listener.close();
             } catch (IOException error) {
                 Log.d(TAG, "Listener close", error);
+            }
+            try {
+                if (session.chat_listener != null) session.chat_listener.close();
+            } catch (IOException error) {
+                Log.d(TAG, "Chat listener close", error);
             }
         }
         for (Socket socket : session.sockets) {
@@ -356,7 +364,7 @@ public class MainActivity extends Activity {
                 : getString(R.string.foreground_only));
             discovery_metric.setText(running && session.discovery_active
                 ? R.string.active : R.string.inactive);
-            echo_metric.setText(running && session.echo_active
+            echo_metric.setText(running && (session.echo_active || session.chat_active)
                 ? R.string.listening_port : R.string.inactive);
             session_id_view.setText(running ? session.id : getString(R.string.no_active_session));
         });
@@ -377,8 +385,8 @@ public class MainActivity extends Activity {
             session.discovery_active = true;
             update_session_ui(session);
             JSONObject hello = new JSONObject().put("version", 1).put("peer_id", peer_id)
-                .put("session_id", session.id).put("name", name).put("tcp_port", 50002)
-                .put("capabilities", new JSONArray().put("echo_v1").put("file_v1"));
+                .put("session_id", session.id).put("name", name).put("tcp_port", ChatRules.CHAT_PORT)
+                .put("capabilities", new JSONArray().put("echo_v1").put("file_v1").put("chat_v1"));
             byte[] packet = ("LMAN\u0001" + hello).getBytes(StandardCharsets.UTF_8);
             if (packet.length > 1200) throw new IOException("HELLO too large");
             long next_announcement = 0;
@@ -615,6 +623,45 @@ public class MainActivity extends Activity {
             if (session.running) report(session, getString(R.string.echo_stopped, error));
         } finally {
             session.echo_active = false;
+            update_session_ui(session);
+        }
+    }
+
+    private void chat_server(Session session) {
+        if (!session.running) return;
+        try (ServerSocket listener = new ServerSocket()) {
+            synchronized (session) {
+                if (!session.running) return;
+                session.chat_listener = listener;
+            }
+            listener.setReuseAddress(true);
+            listener.bind(new InetSocketAddress("0.0.0.0", ChatRules.CHAT_PORT));
+            listener.setSoTimeout(250);
+            session.chat_active = true;
+            update_session_ui(session);
+            while (session.running) {
+                Socket socket;
+                try {
+                    socket = listener.accept();
+                } catch (SocketTimeoutException ignored) {
+                    continue;
+                }
+                session.sockets.add(socket);
+                try {
+                    session.workers.execute(() -> handle_connection(session, socket));
+                } catch (RejectedExecutionException error) {
+                    session.sockets.remove(socket);
+                    try {
+                        socket.close();
+                    } catch (IOException close_error) {
+                        Log.d(TAG, "Rejected connection close", close_error);
+                    }
+                }
+            }
+        } catch (Exception error) {
+            if (session.running) report(session, getString(R.string.chat_stopped, error));
+        } finally {
+            session.chat_active = false;
             update_session_ui(session);
         }
     }

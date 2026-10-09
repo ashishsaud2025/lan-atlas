@@ -24,7 +24,7 @@
     <string name="echo_listener">Application listener</string>
     <string name="inactive">Inactive</string>
     <string name="active">Active</string>
-    <string name="listening_port">ECHO + files :50002</string>
+    <string name="listening_port">Chat + ECHO :50001 · ECHO :50002</string>
     <string name="security_summary">Presence is not trust</string>
     <string name="security_body">Nearby means a recent UDP announcement was observed. Compatible means a framed protocol exchange succeeded. Authentication and encryption are not implemented.</string>
     <string name="observed_network">Observed network</string>
@@ -65,6 +65,7 @@
     <string name="started_session">Started session %1$s</string>
     <string name="discovery_stopped">Discovery stopped: %1$s</string>
     <string name="echo_stopped">ECHO listener stopped: %1$s</string>
+    <string name="chat_stopped">Chat listener stopped: %1$s</string>
     <string name="echo_connection_ended">ECHO connection ended: %1$s</string>
     <string name="connection_ended">Application connection ended: %1$s</string>
     <string name="probe_failed">Probe failed: %1$s</string>

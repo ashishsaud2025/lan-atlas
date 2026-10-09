@@ -164,10 +164,31 @@ public class MainActivity extends Activity {
         volatile ServerSocket listener;
         volatile ServerSocket chat_listener;
         volatile TransferTask transfer;
+        volatile List<PeerSnapshot> roster = Collections.emptyList();
+        final ChatRules.ChatDedupe chat_seen = new ChatRules.ChatDedupe();
+        final List<ChatEntry> chat_history =
+            Collections.synchronizedList(new ArrayList<>());
         WifiManager.MulticastLock wifi_lock;
         final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
         final ThreadPoolExecutor workers = new ThreadPoolExecutor(
             4, 4, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(4));
+    }
+
+    private static final class ChatEntry {
+        final String id = UUID.randomUUID().toString();
+        final String direction;
+        final String scope;
+        final String text;
+        final String sender;
+        volatile String state;
+
+        ChatEntry(String direction, String scope, String text, String sender, String state) {
+            this.direction = direction;
+            this.scope = scope;
+            this.text = text;
+            this.sender = sender;
+            this.state = state;
+        }
     }
 
     @Override public void onCreate(Bundle saved_state) {
@@ -470,6 +491,9 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             if (session != null && current != session) return;
             if (session == null && current != null) return;
+            if (session != null) {
+                session.roster = Collections.unmodifiableList(new ArrayList<>(peers));
+            }
             int count = peers.size();
             top_nearby.setText(getResources().getQuantityString(
                 R.plurals.sessions_nearby, count, count));
@@ -674,6 +698,10 @@ public class MainActivity extends Activity {
                 receive_file(session, socket, request);
                 return;
             }
+            if ("CHAT".equals(request.getString("type"))) {
+                receive_chat(session, socket, request);
+                return;
+            }
             while (session.running) {
                 if (!"ECHO".equals(request.getString("type"))) {
                     throw new IOException("Expected ECHO or FILE_OFFER");
@@ -692,6 +720,43 @@ public class MainActivity extends Activity {
         } finally {
             session.sockets.remove(socket);
         }
+    }
+
+    private void receive_chat(Session session, Socket socket, JSONObject request) throws Exception {
+        JSONObject body = request.getJSONObject("body");
+        String scope = body.getString("scope");
+        if (!"room".equals(scope) && !"dm".equals(scope)) {
+            throw new IOException("Invalid chat scope");
+        }
+        String text = body.getString("text");
+        if (!ChatRules.validIncomingText(text)) throw new IOException("Invalid chat text");
+        if ("dm".equals(scope)
+                && !ChatRules.acceptableDm(body.getString("to_session"), session.id)) {
+            throw new IOException("DM addressed to another session");
+        }
+        String sender_session = request.getString("session_id");
+        String sender_peer = request.getString("peer_id");
+        boolean fresh = session.chat_seen.fresh(sender_session, request.getString("message_id"));
+        if (fresh) {
+            String sender = sender_peer.substring(0, 8);
+            for (PeerSnapshot peer : session.roster) {
+                if (peer.peer_id.equals(sender_peer)) {
+                    sender = peer.name;
+                    break;
+                }
+            }
+            synchronized (session.chat_history) {
+                session.chat_history.add(new ChatEntry(
+                    "in", scope, text, sender + " (unverified)", "accepted"));
+                while (session.chat_history.size() > ChatRules.MAX_HISTORY) {
+                    session.chat_history.remove(0);
+                }
+            }
+            report(session, "Chat " + scope + " from " + sender);
+        }
+        JSONObject reply = message(session, "ACK", new JSONObject().put("status", "accepted"));
+        reply.put("reply_to", request.getString("message_id"));
+        Frames.send(socket.getOutputStream(), reply.toString());
     }
 
     private void choose_file_to_send() {

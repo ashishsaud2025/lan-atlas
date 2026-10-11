@@ -118,6 +118,7 @@ class MainWindow(QMainWindow):
             self.theme_mode = apply_theme(app, self.theme_mode)
         self.service = service
         self._service_running = False
+        self._service_stopped = False
         if portal is not None:
             content = portal.content
             if (content.hello != service.hello
@@ -1836,24 +1837,34 @@ class MainWindow(QMainWindow):
     @Slot()
     def _toggle_session(self) -> None:
         """Start the session once or stop it; restarts need a new launch."""
-        if not self._service_running:
+        if not self._service_running and not self._service_stopped:
             try:
                 self.service.start()
             except RuntimeError:
                 pass
             self._service_running = True
-        else:
+        elif self._service_running:
             self.service.stop()
-            self.hero_action.setEnabled(False)
-            self.hero_action.setToolTip("Restart the app for a new session")
+            self._service_running = False
+            self._service_stopped = True
         self._refresh_hero()
 
     def _refresh_hero(self) -> None:
         """Mirror the live service state on the Overview hero."""
-        running = self._service_running
-        self.hero_action.setText("Stop session" if running else "Start session")
-        if hasattr(self, "hero_count") and hasattr(self, "peer_records"):
-            nearby = sum(record.nearby for record in self.peer_records)
+        if self._service_running:
+            self.hero_action.setText("Stop session")
+            self.hero_action.setEnabled(True)
+            self.hero_action.setToolTip("")
+        elif self._service_stopped:
+            self.hero_action.setText("Session stopped")
+            self.hero_action.setEnabled(False)
+            self.hero_action.setToolTip("Restart the app for a new session")
+        else:
+            self.hero_action.setText("Start session")
+            self.hero_action.setEnabled(True)
+        nearby = (sum(record.nearby for record in self.peer_records)
+                  if self._service_running else 0)
+        if hasattr(self, "hero_count"):
             self.hero_count.setText(str(nearby))
 
     @Slot()

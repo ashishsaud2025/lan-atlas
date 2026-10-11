@@ -57,7 +57,7 @@ def test_overview_hero_toggles_service(app: object, window: object) -> None:
     QTest.mouseClick(window.hero_action, Qt.MouseButton.LeftButton)
     assert window.hero_action.text() == 'Stop session'
     QTest.mouseClick(window.hero_action, Qt.MouseButton.LeftButton)
-    assert window.hero_action.text() == 'Stop session'
+    assert window.hero_action.text() == 'Session stopped'
     assert not window.hero_action.isEnabled()
 
 
@@ -81,3 +81,30 @@ def test_messages_empty_hides_on_first_row(app: object, window: object) -> None:
     window.message_model.append(MessageEntry('id-1', 'Peer', 'hi', 'room', 'accepted', False, 0))
     QApplication.processEvents()
     assert window.messages_empty.isHidden()
+
+
+def test_hero_shows_stopped_state(app: object, window: object) -> None:
+    import time
+    from uuid import uuid4
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from core.discovery import Hello
+    from core.peer_repository import PeerRecord
+    hello = Hello(str(uuid4()), str(uuid4()), 'P', 50001, ('chat_v1',))
+    window.peer_records = (PeerRecord(hello, '192.168.1.2', time.monotonic()),)
+    QTest.mouseClick(window.hero_action, Qt.MouseButton.LeftButton)
+    assert window.hero_action.text() == 'Stop session'
+    QTest.mouseClick(window.hero_action, Qt.MouseButton.LeftButton)
+    assert window.hero_action.text() == 'Session stopped'
+    assert not window.hero_action.isEnabled()
+    assert window.hero_count.text() == '0'
+
+
+def test_badge_unknown_index_warns(app: object, window: object, caplog) -> None:
+    import logging
+    window.navigation.set_badge(999, '3')
+    assert window.navigation.page_items.get(999) is None
+    assert any('999' in record.message for record in caplog.records
+               if record.levelno >= logging.WARNING)

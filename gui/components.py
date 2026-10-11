@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 from typing import Any
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
@@ -68,6 +69,7 @@ class NavigationRail(QFrame):
         """Show a count badge on one page, clearing back to its base label."""
         item = self.page_items.get(index)
         if item is None:
+            logging.warning("Navigation badge index missing: %s", index)
             return
         base = self.base_labels.get(index, item.text())
         shown = text.strip()

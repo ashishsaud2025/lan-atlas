@@ -13,7 +13,6 @@ from pathlib import Path
 import select
 import socket
 import ssl
-import tempfile
 import threading
 import time
 from typing import Any, BinaryIO
@@ -24,6 +23,7 @@ from core.protocol import (
     MAX_FILE_SIZE, ProtocolError, envelope, recv_message, send_message,
     validate_envelope,
 )
+from core.resume import ReceiveManifest
 from core.roster import Peer, candidate_ips
 from core.secure_transport import SecureTransportError
 
@@ -363,10 +363,12 @@ class TransferService:
         accepted = False
         declined = False
         temporary: Path | None = None
+        resume_dir: Path | None = None
+        resume_name: str | None = None
         try:
             if not self.emit("file_offer", {"id": transfer.identifier, "name": body["name"],
-                                           "size": body["size"], "peer_id": offer["peer_id"],
-                                           "authenticated": transfer.authenticated}):
+                                            "size": body["size"], "peer_id": offer["peer_id"],
+                                            "authenticated": transfer.authenticated}):
                 raise TransferError("offer queue full")
             try:
                 self._wait_decision(transfer)
@@ -383,13 +385,39 @@ class TransferService:
                 return
             if destination.exists():
                 raise TransferError("destination already exists; choose a new filename")
-            descriptor, name = tempfile.mkstemp(prefix=".lman-", suffix=".part",
-                                                dir=destination.parent)
-            temporary = Path(name)
-            with os.fdopen(descriptor, "wb") as stream:
-                self._write(transfer, "FILE_ACCEPT")
+            resume_dir, resume_name = destination.parent, destination.name
+            manifest = ReceiveManifest.load(resume_dir, resume_name)
+            part = resume_dir / (resume_name + ".part")
+            offset = 0
+            if self._resume_match(manifest, offer, body):
+                assert manifest is not None
+                offset = manifest["held"]
+                if not part.is_file() or part.stat().st_size != offset:
+                    ReceiveManifest.discard(resume_dir, resume_name)
+                    raise TransferError("held bytes changed; restart the transfer")
+            elif part.exists():
+                ReceiveManifest.discard(resume_dir, resume_name)
+                try:
+                    part.unlink()
+                except OSError as error:
+                    raise TransferError("cannot clear stale partial file") from error
+                ReceiveManifest.save(resume_dir, {
+                    "transfer_id": transfer.identifier, "name": resume_name,
+                    "size": body["size"], "sha256": body["sha256"], "held": 0,
+                    "peer_id": offer["peer_id"], "session_id": offer["session_id"]})
+                part.touch()
+            else:
+                ReceiveManifest.save(resume_dir, {
+                    "transfer_id": transfer.identifier, "name": resume_name,
+                    "size": body["size"], "sha256": body["sha256"], "held": 0,
+                    "peer_id": offer["peer_id"], "session_id": offer["session_id"]})
+                part.touch()
+            temporary = part
+            with temporary.open("r+b") as stream:
+                stream.seek(offset)
+                self._write(transfer, "FILE_ACCEPT", offset=offset)
                 accepted = True
-                count = 0
+                count = offset
                 while True:
                     message = self._read(transfer, offer["peer_id"], offer["session_id"])
                     if message["type"] == "FILE_DONE":
@@ -412,6 +440,10 @@ class TransferService:
                         raise TransferError("chunk exceeds offered size or chunk limit")
                     stream.write(chunk)
                     count += len(chunk)
+                    ReceiveManifest.save(resume_dir, {
+                        "transfer_id": transfer.identifier, "name": resume_name,
+                        "size": body["size"], "sha256": body["sha256"], "held": count,
+                        "peer_id": offer["peer_id"], "session_id": offer["session_id"]})
                     self._progress(transfer, "written", count, body["size"])
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -422,6 +454,12 @@ class TransferService:
                 raise TransferError("received file failed SHA-256 verification")
             self._check(transfer)
             self._publish(temporary, destination)
+            ReceiveManifest.discard(resume_dir, resume_name)
+            try:
+                temporary.unlink()
+            except OSError as error:
+                logging.error("Cannot remove transfer part file %s: %s", temporary, error)
+            temporary = None
             self._status(transfer, "saved", path=str(destination), bytes=size, total=size)
             self._write(transfer, "FILE_RESULT", status="verified", size=size, sha256=digest)
         except (OSError, ProtocolError, ValueError):
@@ -429,11 +467,24 @@ class TransferService:
                 self._decline(transfer)
             raise
         finally:
-            if temporary is not None:
+            if temporary is not None and resume_dir is None:
                 try:
                     temporary.unlink()
                 except OSError as error:
                     logging.error("Cannot remove transfer temporary file %s: %s", temporary, error)
+
+    @staticmethod
+    def _resume_match(manifest: dict[str, Any] | None, offer: dict[str, Any],
+                      body: dict[str, Any]) -> bool:
+        """Match a resume offer against one stored manifest."""
+        if manifest is None:
+            return False
+        return (body.get("resume_id") == manifest["transfer_id"] == body["transfer_id"]
+                and manifest["name"] == body["name"]
+                and manifest["size"] == body["size"]
+                and manifest["sha256"] == body["sha256"]
+                and manifest["peer_id"] == offer["peer_id"]
+                and manifest["session_id"] == offer["session_id"])
 
     @staticmethod
     def _connect_plaintext(peer: Peer) -> tuple[socket.socket, bool]:

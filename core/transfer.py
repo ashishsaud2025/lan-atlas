@@ -61,7 +61,31 @@ def validate_offer(message: dict[str, Any], local_session: str) -> dict[str, Any
     if (not isinstance(digest, str) or len(digest) != 64
             or any(c not in "0123456789abcdef" for c in digest)):
         raise TransferError("invalid SHA-256")
+    resume = body.get("resume_id")
+    if resume is not None:
+        try:
+            if not isinstance(resume, str) or str(UUID(resume)) != resume:
+                raise ValueError("noncanonical UUID")
+        except ValueError as error:
+            raise TransferError("invalid resume ID") from error
     return body
+
+
+def validate_accept(body: dict[str, Any], size: int) -> int:
+    """Validate an accept offset against the offered file size."""
+    if not isinstance(body, dict):
+        raise TransferError("accept must be an object")
+    try:
+        identifier = body.get("transfer_id")
+        if not isinstance(identifier, str) or str(UUID(identifier)) != identifier:
+            raise ValueError("noncanonical UUID")
+    except ValueError as error:
+        raise TransferError("invalid transfer ID") from error
+    offset = body.get("offset", 0)
+    if (type(offset) is not int or type(size) is not int
+            or not 0 <= size <= MAX_FILE_SIZE or not 0 <= offset <= size):
+        raise TransferError("accept offset outside offered size")
+    return offset
 
 
 @dataclass

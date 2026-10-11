@@ -12,7 +12,7 @@ import pytest
 from core.discovery import Hello
 from core.protocol import ProtocolError, envelope, recv_message, send_message, validate_envelope
 from core.roster import Peer
-from core.transfer import TransferError, TransferService, validate_offer
+from core.transfer import TransferError, TransferService, validate_accept, validate_offer
 
 EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
@@ -72,6 +72,22 @@ def test_offer_validation() -> None:
     for name in ("", "..", "a/b", "a\\b", "a:b", "x" * 256):
         with pytest.raises(ProtocolError):
             _offer(sender, receiver, name)
+
+
+def test_offer_accepts_resume_id_and_accept_offset() -> None:
+    sender, receiver = _hello("Sender"), _hello("Receiver")
+    offer = _offer(sender, receiver)
+    offer["body"]["resume_id"] = offer["body"]["transfer_id"]
+    assert validate_offer(offer, receiver.session_id)["resume_id"] == offer["body"]["transfer_id"]
+    bad = _offer(sender, receiver)
+    bad["body"]["resume_id"] = "not-a-uuid"
+    with pytest.raises(TransferError):
+        validate_offer(bad, receiver.session_id)
+    assert validate_accept({"transfer_id": offer["body"]["transfer_id"], "offset": 0}, 0) == 0
+    with pytest.raises(TransferError):
+        validate_accept({"transfer_id": offer["body"]["transfer_id"], "offset": 2 ** 31}, 10)
+    with pytest.raises(TransferError):
+        validate_accept({"transfer_id": "not-a-uuid", "offset": 0}, 10)
 
 
 def test_file_body_validation() -> None:

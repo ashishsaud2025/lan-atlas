@@ -2533,6 +2533,7 @@ class MainWindow(QMainWindow):
         self._refresh_device_tab_counts(records)
         self._show_peer(self._record_in_snapshot(self.peer_selection.session_id))
         self.nearby_status.setText(f"{len(nearby)} sessions nearby")
+        self.navigation.set_badge(PAGE_DEVICES, str(len(nearby)) if nearby else "")
         self.network_status.setText("Discovery active · application listener configured")
         stale_count = len(records) - len(nearby)
         paired_count = sum(
@@ -3514,6 +3515,7 @@ class MainWindow(QMainWindow):
         active = sum(1 for row in self.transfer_rows.values()
                      if row.get("state") not in TERMINAL_TRANSFERS)
         self.transfer_status.setText(f"{active} active transfers")
+        self.navigation.set_badge(PAGE_TRANSFERS, str(active) if active else "")
         self.transfer_value.setText(str(active) if active else "None")
         self.transfer_slots.setText(f"{active} of 4 transfer slots in use")
         self.transfer_drawer.setVisible(active > 0)

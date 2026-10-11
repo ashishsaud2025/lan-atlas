@@ -32,6 +32,7 @@ class NavigationRail(QFrame):
         self.list.setIconSize(QSize(18, 18))
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.page_items: dict[int, QListWidgetItem] = {}
+        self.base_labels: dict[int, str] = {}
         for group, pages in groups:
             heading = QListWidgetItem(group.upper())
             heading.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -45,6 +46,7 @@ class NavigationRail(QFrame):
                 item.setIcon(_navigation_icon(page))
                 item.setData(256, index)
                 self.page_items[index] = item
+                self.base_labels[index] = page
                 self.list.addItem(item)
         self.list.currentItemChanged.connect(self._emit_page)
         self.list.setCurrentItem(self.page_items[0])
@@ -61,6 +63,17 @@ class NavigationRail(QFrame):
         item = self.page_items.get(index)
         if item is not None:
             self.list.setCurrentItem(item)
+
+    def set_badge(self, index: int, text: str) -> None:
+        """Show a count badge on one page, clearing back to its base label."""
+        item = self.page_items.get(index)
+        if item is None:
+            return
+        base = self.base_labels.get(index, item.text())
+        shown = text.strip()
+        if shown.isdigit() and int(shown) > 99:
+            shown = "99+"
+        item.setText(base if not shown else f"{base} ({shown})")
 
     def _emit_page(self, current: QListWidgetItem | None,
                    previous: QListWidgetItem | None) -> None:

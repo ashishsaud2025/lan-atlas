@@ -29,7 +29,7 @@ def build_stylesheet() -> str:
             font-size: 12px;
         }}
         QLabel#MetricValue {{
-            color: {COLORS["primary"]};
+            color: {COLORS["on-surface"]};
             font-family: "{FONTS["mono"]}";
             font-size: 22px;
             font-weight: 700;

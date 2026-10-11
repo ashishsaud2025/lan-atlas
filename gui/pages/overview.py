@@ -25,7 +25,7 @@ def metric_card(title: str, initial: str) -> tuple[QFrame, MonoLabel]:
     frame = QFrame()
     frame.setProperty("card", True)
     layout = QVBoxLayout(frame)
-    layout.setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["md"], SPACE["sm"])
+    layout.setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
     label = MonoLabel(title)
     label.setObjectName("MetricLabel")
     value = MonoLabel(initial)

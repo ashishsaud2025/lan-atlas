@@ -91,6 +91,8 @@ def card(title: str, value: str) -> tuple[QFrame, QLabel]:
     frame = QFrame()
     frame.setProperty("card", True)
     layout = QVBoxLayout(frame)
+    layout.setContentsMargins(SPACING["lg"], SPACING["lg"],
+                              SPACING["lg"], SPACING["lg"])
     label = QLabel(title)
     label.setObjectName("MetricLabel")
     metric = QLabel(value)
@@ -107,6 +109,11 @@ def action_button(text: str, callback: Callable[[], None],
     button.setProperty("primary", primary)
     button.clicked.connect(callback)
     return button
+
+
+def primary_action(text: str, callback: Callable[[], None]) -> QPushButton:
+    """Create the one solid primary action for a page."""
+    return action_button(text, callback, primary=True)
 
 
 def _navigation_icon(page: str) -> QIcon:

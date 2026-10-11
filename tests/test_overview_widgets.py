@@ -321,3 +321,16 @@ def test_refined_tokens_match_design() -> None:
     assert COLORS['surface-container'] == '#131b28'
     assert RADIUS['DEFAULT'] == 12
     assert FONTS['styles']['body-md']['size'] == 14
+
+
+def test_primary_action_marks_single_primary(app: object) -> None:
+    from gui.components import primary_action
+    button = primary_action('Start', lambda: None)
+    assert button.property('primary') is True
+
+
+def test_status_pill_keeps_states_with_tracking(app: object) -> None:
+    from gui.widgets.status_pill import StatusPill
+    pill = StatusPill('Nearby', 'nearby')
+    assert pill.text() == 'Nearby'
+    assert pill.font().letterSpacing() > 100

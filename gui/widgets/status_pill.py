@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QLabel
 
 _VALID_STATES = (
@@ -16,6 +17,9 @@ class StatusPill(QLabel):
     def __init__(self, text: str = "", state: str = "nearby") -> None:
         super().__init__(text)
         self.setObjectName("StatusPill")
+        font = self.font()
+        font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 108)
+        self.setFont(font)
         self._state = "nearby"
         self.set_state(state)
 

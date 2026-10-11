@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QFrame, QLabel, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget,
 )
 
-from gui.theme import GEOMETRY, SPACING
+from gui.theme import COLORS, GEOMETRY, SPACING
 
 
 class NavigationRail(QFrame):
@@ -148,47 +148,60 @@ def empty_state(explanation: str, action_text: str,
 
 
 def _navigation_icon(page: str) -> QIcon:
-    """Draw restrained monochrome navigation glyphs without icon-font dependencies."""
+    """Draw Lucide-style stroke glyphs from theme tokens without dependencies."""
     pixmap = QPixmap(36, 36)
     pixmap.setDevicePixelRatio(2.0)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.scale(2.0, 2.0)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(QPen(QColor("#9FB7C1"), 1.5))
+    pen = QPen(QColor(COLORS["on-surface-variant"]), 2.0)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
     if page == "Overview":
         for x, y in ((2, 2), (10, 2), (2, 10), (10, 10)):
-            painter.drawRect(x, y, 5, 5)
+            painter.drawRoundedRect(x, y, 6, 6, 1.5, 1.5)
     elif page == "Network":
-        painter.drawLine(4, 5, 9, 9)
+        painter.drawLine(4, 6, 9, 9)
         painter.drawLine(14, 4, 9, 9)
         painter.drawLine(9, 9, 5, 14)
-        for point in (QPoint(4, 4), QPoint(14, 3), QPoint(9, 9), QPoint(5, 14)):
+        for point in (QPoint(4, 5), QPoint(14, 3), QPoint(9, 9), QPoint(5, 14)):
             painter.drawEllipse(point, 2, 2)
-    elif page in {"Devices", "Workbench"}:
-        painter.drawRoundedRect(QRect(2, 3, 14, 10), 1, 1)
+    elif page == "Devices":
+        painter.drawRoundedRect(QRect(2, 3, 14, 10), 2, 2)
         painter.drawLine(6, 16, 12, 16)
         painter.drawLine(9, 13, 9, 16)
-        if page == "Workbench":
-            painter.drawLine(5, 6, 13, 11)
+    elif page == "Workbench":
+        painter.drawRoundedRect(QRect(2, 3, 14, 10), 2, 2)
+        painter.drawLine(6, 16, 12, 16)
+        painter.drawLine(9, 13, 9, 16)
+        painter.drawLine(5, 6, 13, 11)
     elif page == "Files":
-        painter.drawRect(2, 5, 14, 10)
-        painter.drawLine(2, 5, 7, 5)
-        painter.drawLine(4, 3, 8, 3)
+        painter.drawLine(2, 7, 2, 15)
+        painter.drawLine(2, 15, 16, 15)
+        painter.drawLine(16, 15, 16, 7)
+        painter.drawLine(16, 7, 11, 7)
+        painter.drawLine(8, 7, 8, 4)
+        painter.drawLine(8, 4, 4, 4)
+        painter.drawLine(4, 4, 4, 7)
+        painter.drawLine(4, 7, 2, 7)
     elif page == "Transfers":
-        painter.drawLine(2, 6, 14, 6)
-        painter.drawLine(11, 3, 14, 6)
-        painter.drawLine(14, 6, 11, 9)
-        painter.drawLine(16, 12, 4, 12)
-        painter.drawLine(7, 9, 4, 12)
-        painter.drawLine(4, 12, 7, 15)
+        painter.drawLine(6, 3, 6, 15)
+        painter.drawLine(3, 6, 6, 3)
+        painter.drawLine(6, 3, 9, 6)
+        painter.drawLine(12, 3, 12, 15)
+        painter.drawLine(9, 12, 12, 15)
+        painter.drawLine(12, 15, 15, 12)
     elif page == "Messages":
-        painter.drawRoundedRect(QRect(2, 3, 14, 11), 2, 2)
-        painter.drawLine(5, 14, 3, 17)
-        painter.drawLine(5, 7, 13, 7)
-        painter.drawLine(5, 10, 11, 10)
+        painter.drawRoundedRect(QRect(2, 3, 14, 10), 2, 2)
+        painter.drawLine(6, 13, 6, 16)
+        painter.drawLine(6, 16, 9, 13)
+        painter.drawLine(5, 6, 13, 6)
+        painter.drawLine(5, 9, 11, 9)
     elif page == "Feed":
-        painter.drawEllipse(QPoint(4, 14), 1, 1)
+        painter.drawEllipse(QPoint(4, 14), 1.5, 1.5)
         painter.drawArc(QRect(2, 7, 9, 9), 0, 90 * 16)
         painter.drawArc(QRect(2, 3, 14, 14), 0, 90 * 16)
     elif page == "Games":
@@ -198,10 +211,18 @@ def _navigation_icon(page: str) -> QIcon:
         painter.drawPoint(12, 9)
         painter.drawPoint(14, 11)
     elif page == "Activity":
-        painter.drawLine(2, 14, 5, 10)
-        painter.drawLine(5, 10, 8, 12)
-        painter.drawLine(8, 12, 12, 4)
-        painter.drawLine(12, 4, 16, 7)
+        painter.drawLine(2, 13, 6, 13)
+        painter.drawLine(6, 13, 9, 5)
+        painter.drawLine(9, 5, 12, 13)
+        painter.drawLine(12, 13, 16, 10)
+    elif page == "Settings":
+        painter.drawEllipse(QPoint(9, 9), 3, 3)
+        for step in range(8):
+            painter.save()
+            painter.translate(9, 9)
+            painter.rotate(45 * step)
+            painter.drawLine(0, -7, 0, -5)
+            painter.restore()
     else:
         painter.drawEllipse(QRect(3, 3, 12, 12))
         painter.drawEllipse(QRect(7, 7, 4, 4))

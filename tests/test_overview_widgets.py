@@ -334,3 +334,43 @@ def test_status_pill_keeps_states_with_tracking(app: object) -> None:
     pill = StatusPill('Nearby', 'nearby')
     assert pill.text() == 'Nearby'
     assert pill.font().letterSpacing() > 100
+
+
+def test_nav_icons_cover_all_pages_distinctly(app: object) -> None:
+    from gui.components import _navigation_icon
+    from PySide6.QtGui import QImage
+    pages = ('Overview', 'Network', 'Devices', 'Workbench', 'Files', 'Transfers',
+             'Messages', 'Feed', 'Games', 'Activity', 'Settings')
+    seen: set[bytes] = set()
+    for page in pages:
+        pixmap = _navigation_icon(page).pixmap(36, 36)
+        assert pixmap is not None and not pixmap.isNull()
+        image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        bits = image.bits()
+        assert bits is not None
+        raw = bytes(bits)
+        assert any(raw[offset + 3] > 0 for offset in range(0, len(raw), 4))
+        seen.add(raw)
+    assert len(seen) == len(pages)
+    fallback_image = _navigation_icon("Nope").pixmap(36, 36).toImage().convertToFormat(
+        QImage.Format.Format_ARGB32)
+    assert bytes(fallback_image.bits()) not in seen
+
+
+def test_nav_icons_use_theme_palette(app: object) -> None:
+    from PySide6.QtGui import QColor
+    from gui.components import _navigation_icon
+    from gui.theme.tokens import COLORS
+    from PySide6.QtGui import QImage
+    palette = [QColor(value) for value in COLORS.values()]
+    pixmap = _navigation_icon('Devices').pixmap(72, 72)
+    image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    bits = image.bits()
+    assert bits is not None
+    raw = bytes(bits)
+    painted = [(raw[o + 2], raw[o + 1], raw[o], raw[o + 3])
+               for o in range(0, len(raw), 4) if raw[o + 3] > 32]
+    assert painted
+    for red, green, blue, _ in painted:
+        assert any(abs(red - c.red()) < 40 and abs(green - c.green()) < 40
+                   and abs(blue - c.blue()) < 40 for c in palette)

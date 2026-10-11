@@ -26,7 +26,10 @@ def header_icon(kind: str) -> QLabel:
     painter = QPainter(pixmap)
     painter.scale(2.0, 2.0)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(QPen(QColor(COLORS["primary"]), 1.5))
+    pen = QPen(QColor(COLORS["primary"]), 2.0)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
     if kind == "hub":
         _hub(painter)
     elif kind == "stats":

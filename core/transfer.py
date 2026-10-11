@@ -531,11 +531,9 @@ class TransferService:
         if manifest is None:
             return False
         return (body.get("resume_id") == manifest["transfer_id"] == body["transfer_id"]
-                and manifest["name"] == body["name"]
                 and manifest["size"] == body["size"]
                 and manifest["sha256"] == body["sha256"]
-                and manifest["peer_id"] == offer["peer_id"]
-                and manifest["session_id"] == offer["session_id"])
+                and manifest["peer_id"] == offer["peer_id"])
 
     @staticmethod
     def _connect_plaintext(peer: Peer) -> tuple[socket.socket, bool]:

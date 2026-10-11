@@ -23,7 +23,7 @@ from core.protocol import (
     MAX_FILE_SIZE, ProtocolError, envelope, recv_message, send_message,
     validate_envelope,
 )
-from core.resume import ReceiveManifest
+from core.resume import ReceiveManifest, SendManifest
 from core.roster import Peer, candidate_ips
 from core.secure_transport import SecureTransportError
 
@@ -160,6 +160,36 @@ class TransferService:
         self._launch(identifier, lambda transfer: self._send(transfer, path, peer))
         return identifier
 
+    def resume_pending(self, peer: Peer, directory: Path) -> str | None:
+        """Re-offer one interrupted send; changed sources restart fresh."""
+        if "file_v1" not in peer.hello.capabilities:
+            raise TransferError("peer does not advertise file_v1")
+        for record in SendManifest.scan(Path(directory)):
+            if record["peer_id"] != peer.hello.peer_id:
+                continue
+            path = Path(record["path"])
+            if not path.is_file():
+                SendManifest.discard(Path(directory), record["transfer_id"])
+                continue
+            with path.open("rb") as stream:
+                size = 0
+                digest = hashlib.sha256()
+                while True:
+                    chunk = stream.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    digest.update(chunk)
+            if (record.get("size") != size
+                    or record.get("sha256") != digest.hexdigest()):
+                SendManifest.discard(Path(directory), record["transfer_id"])
+                return self.send(path, peer)
+            identifier = record["transfer_id"]
+            self._launch(identifier,
+                         lambda transfer: self._send(transfer, path, peer, True))
+            return identifier
+        return None
+
     def receive(self, conn: socket.socket, message: dict[str, Any],
                 authenticated: bool = False) -> None:
         """Take ownership of an offer connection only after successful admission."""
@@ -261,19 +291,29 @@ class TransferService:
             raise TransferError("transfer identity mismatch")
         return message
 
-    def _send(self, transfer: Transfer, path: Path, peer: Peer) -> None:
+    def _send(self, transfer: Transfer, path: Path, peer: Peer,
+              resume: bool = False) -> None:
         self._status(transfer, "hashing", name=path.name)
+        manifest_dir = path.parent
         with path.open("rb") as stream:
             size, digest = self._hash(transfer, stream)
+            SendManifest.save(manifest_dir, {
+                "transfer_id": transfer.identifier, "path": str(path),
+                "size": size, "sha256": digest,
+                "peer_id": peer.hello.peer_id, "session_id": peer.hello.session_id})
             stream.seek(0)
             transfer.conn, transfer.authenticated = self.connector(peer)
             transfer.connected = True
             if self.observe_socket is not None:
                 self.observe_socket(transfer.conn, True)
+            offer_body: dict[str, Any] = {
+                "transfer_id": transfer.identifier, "name": path.name,
+                "size": size, "sha256": digest,
+                "to_session": peer.hello.session_id}
+            if resume:
+                offer_body["resume_id"] = transfer.identifier
             offer = envelope("FILE_OFFER", self.hello.peer_id, self.hello.session_id,
-                             {"transfer_id": transfer.identifier, "name": path.name,
-                              "size": size, "sha256": digest,
-                              "to_session": peer.hello.session_id})
+                             offer_body)
             validate_offer(offer, peer.hello.session_id)
             self._check(transfer)
             send_message(transfer.conn, offer)
@@ -281,12 +321,22 @@ class TransferService:
             reply = self._read(transfer, peer.hello.peer_id, peer.hello.session_id,
                                OFFER_TIMEOUT + 5)
             if reply["type"] == "FILE_DECLINE":
+                SendManifest.discard(manifest_dir, transfer.identifier)
                 self._status(transfer, "declined")
                 return
             if reply["type"] != "FILE_ACCEPT":
                 raise TransferError("expected FILE_ACCEPT")
-            offset = 0
+            offset = validate_accept(reply["body"], size)
             sent_hash = hashlib.sha256()
+            if offset:
+                remaining = offset
+                while remaining:
+                    self._check(transfer)
+                    prefix = stream.read(min(CHUNK_SIZE, remaining))
+                    if not prefix:
+                        raise TransferError("source shrank after hashing")
+                    sent_hash.update(prefix)
+                    remaining -= len(prefix)
             while True:
                 self._check(transfer)
                 chunk = stream.read(CHUNK_SIZE)
@@ -309,6 +359,7 @@ class TransferService:
                     or reply["body"].get("size") != size
                     or reply["body"].get("status") != "verified"):
                 raise TransferError("receiver did not verify file")
+            SendManifest.discard(manifest_dir, transfer.identifier)
             self._status(transfer, "verified", bytes=size, total=size)
 
     def _decline(self, transfer: Transfer) -> None:

@@ -101,6 +101,12 @@ def _validate_send(record: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("invalid source path")
     if _expired(validated["saved_ms"]):
         raise ValueError("manifest expired")
+    size, digest = record.get("size"), record.get("sha256")
+    if size is not None or digest is not None:
+        if (type(size) is not int or not 0 <= size <= MAX_FILE_SIZE):
+            raise ValueError("invalid source size")
+        validated["size"] = size
+        validated["sha256"] = _check_digest(digest)
     return validated
 
 
@@ -178,3 +184,23 @@ class SendManifest:
             (Path(directory) / (clean + "." + SEND_NAME)).unlink()
         except OSError:
             return
+
+    @staticmethod
+    def scan(directory: Path) -> list[dict[str, Any]]:
+        """Return unexpired sender records ordered by file name."""
+        try:
+            children = sorted(Path(directory).iterdir())
+        except OSError:
+            return []
+        records = []
+        for child in children:
+            if not child.is_file() or not child.name.endswith("." + SEND_NAME):
+                continue
+            record = _read_json(child)
+            if record is None:
+                continue
+            try:
+                records.append(_validate_send(record))
+            except ValueError:
+                continue
+        return records

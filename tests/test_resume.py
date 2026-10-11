@@ -172,3 +172,90 @@ def test_wrong_sender_peer_restarts_at_zero(tmp_path):
         first.close()
         receiver.stop()
         assert receiver.join(5)
+
+
+def _fake_receiver_accept(first: socket.socket, sender: Hello, receiver_hello: Hello,
+                          transfer_id: str, offset: int, original: bytes) -> None:
+    size = len(original)
+    digest = hashlib.sha256(original).hexdigest()
+    offer = recv_message(first, timeout=10)
+    assert offer is not None and offer["type"] == "FILE_OFFER"
+    assert offer["body"]["transfer_id"] == transfer_id
+    send_message(first, envelope("FILE_ACCEPT", receiver_hello.peer_id,
+                                 receiver_hello.session_id,
+                                 {"transfer_id": transfer_id, "offset": offset}))
+    received = bytearray()
+    while True:
+        message = recv_message(first, timeout=10)
+        assert message is not None
+        if message["type"] == "FILE_DONE":
+            break
+        assert message["type"] == "FILE_CHUNK"
+        assert message["body"]["offset"] == offset + len(received)
+        received += base64.b64decode(message["body"]["data"])
+    assert bytes(received) == original[offset:]
+    send_message(first, envelope("FILE_RESULT", receiver_hello.peer_id,
+                                 receiver_hello.session_id,
+                                 {"transfer_id": transfer_id, "status": "verified",
+                                  "size": size, "sha256": digest}))
+
+
+def test_sender_seeks_and_reseeds_on_offset(tmp_path):
+    original = bytes(range(256)) * 800
+    assert len(original) == 204800
+    sender_hello, receiver_hello = _hello("Sender"), _hello("Receiver")
+    src = tmp_path / "source.bin"
+    src.write_bytes(original)
+    emit = Emitter()
+    sender = TransferService(sender_hello, emit)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(10)
+    try:
+        from core.roster import Peer
+        from core.discovery import Hello as HelloInfo
+        peer = Peer(HelloInfo(receiver_hello.peer_id, receiver_hello.session_id,
+                              "Receiver", listener.getsockname()[1], ("file_v1",)),
+                    "127.0.0.1", 0.0)
+        identifier = sender.send(src, peer)
+        conn, _ = listener.accept()
+        conn.settimeout(10)
+        try:
+            _fake_receiver_accept(conn, sender_hello, receiver_hello, identifier,
+                                  131072, original)
+        finally:
+            conn.close()
+        assert _wait_done(sender)
+        states = [data["state"] for kind, data in emit.items
+                  if kind == "transfer" and data["id"] == identifier]
+        assert "verified" in states
+    finally:
+        sender.stop()
+        assert sender.join(5)
+        listener.close()
+
+
+def test_changed_source_restarts_with_new_id(tmp_path):
+    sender_hello, receiver_hello = _hello("Sender"), _hello("Receiver")
+    src = tmp_path / "source.bin"
+    src.write_bytes(bytes(1000))
+    from core.roster import Peer
+    from core.discovery import Hello as HelloInfo
+    peer = Peer(HelloInfo(receiver_hello.peer_id, receiver_hello.session_id,
+                          "Receiver", 50099, ("file_v1",)), "127.0.0.1", 0.0)
+    service = TransferService(sender_hello, Emitter())
+    old_id = str(uuid4())
+    SendManifest.save(tmp_path, {"transfer_id": old_id, "path": str(src),
+                                 "size": 1000,
+                                 "sha256": hashlib.sha256(bytes(1000)).hexdigest(),
+                                 "peer_id": receiver_hello.peer_id,
+                                 "session_id": receiver_hello.session_id})
+    src.write_bytes(bytes(1001))
+    try:
+        new_id = service.resume_pending(peer, tmp_path)
+        assert new_id is not None and new_id != old_id
+        service.cancel(new_id)
+    finally:
+        service.stop()
+        assert service.join(5)

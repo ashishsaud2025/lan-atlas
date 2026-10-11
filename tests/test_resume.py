@@ -388,3 +388,136 @@ def test_receiver_crash_keeps_partial_state(tmp_path):
             pass
         receiver.stop()
         assert receiver.join(5)
+
+
+def test_concurrent_saves_leave_valid_manifest(tmp_path):
+    import threading
+    record = {'transfer_id': '00000000-0000-4000-8000-000000000001', 'name': 'n',
+              'size': 100, 'sha256': 'b' * 64, 'held': 0,
+              'peer_id': '00000000-0000-4000-8000-000000000002',
+              'session_id': '00000000-0000-4000-8000-000000000003'}
+    errors = []
+
+    def save(held):
+        try:
+            item = dict(record, held=held)
+            ReceiveManifest.save(tmp_path, item)
+        except Exception as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=save, args=(held,)) for held in range(20)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert not errors
+    loaded = ReceiveManifest.load(tmp_path, 'n')
+    assert loaded is not None and loaded['held'] in range(20)
+
+
+def test_load_purges_expired_and_corrupt_sidecars(tmp_path):
+    import json
+    expired = {'transfer_id': '00000000-0000-4000-8000-000000000001', 'name': 'old',
+               'size': 10, 'sha256': 'c' * 64, 'held': 1,
+               'peer_id': '00000000-0000-4000-8000-000000000002',
+               'session_id': '00000000-0000-4000-8000-000000000003', 'saved_ms': 1}
+    (tmp_path / 'old.resume.json').write_text(json.dumps(expired), encoding='utf-8')
+    (tmp_path / 'junk.resume.json').write_text('{broken', encoding='utf-8')
+    assert ReceiveManifest.load(tmp_path, 'old') is None
+    assert ReceiveManifest.load(tmp_path, 'junk') is None
+    assert not (tmp_path / 'old.resume.json').exists()
+    assert not (tmp_path / 'junk.resume.json').exists()
+    assert SendManifest.scan(tmp_path) == []
+
+
+def test_same_name_concurrent_receive_refused(tmp_path):
+    original = bytes(300000)
+    sender_hello = _hello('Sender')
+    receiver_hello = _hello('Receiver')
+    digest = hashlib.sha256(original).hexdigest()
+    dest = tmp_path / 'dest.bin'
+    emit = Emitter()
+    receiver = TransferService(receiver_hello, emit)
+    first_a, second_a = socket.socketpair()
+    first_b, second_b = socket.socketpair()
+    try:
+        offer_a = envelope('FILE_OFFER', sender_hello.peer_id, sender_hello.session_id,
+                           {'transfer_id': str(uuid4()), 'name': 'dest.bin',
+                            'size': len(original), 'sha256': digest,
+                            'to_session': receiver_hello.session_id})
+        receiver.receive(second_a, offer_a)
+        id_a = _wait_offer(emit)
+        assert receiver.decide(id_a, dest)
+        accept_a = recv_message(first_a, timeout=10)
+        assert accept_a is not None and accept_a['type'] == 'FILE_ACCEPT'
+        offer_b = envelope('FILE_OFFER', sender_hello.peer_id, sender_hello.session_id,
+                           {'transfer_id': str(uuid4()), 'name': 'dest.bin',
+                            'size': len(original), 'sha256': digest,
+                            'to_session': receiver_hello.session_id})
+        receiver.receive(second_b, offer_b)
+        emit_b_ids = _wait_offer_b(emit, id_a)
+        assert receiver.decide(emit_b_ids, dest)
+        assert _wait_gone(receiver, emit_b_ids)
+        states_b = [d['state'] for k, d in emit.items
+                    if k == 'transfer' and d['id'] == emit_b_ids]
+        assert 'failed' in states_b
+        assert (tmp_path / 'dest.bin.part').stat().st_size == 0
+    finally:
+        first_a.close()
+        first_b.close()
+        receiver.stop()
+        assert receiver.join(5)
+
+
+def _wait_offer_b(emitter, known, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for kind, data in emitter.items:
+            if kind == 'file_offer' and data['id'] != known:
+                return data['id']
+        time.sleep(0.05)
+    raise TimeoutError('second file offer was not published')
+
+
+def _wait_gone(service, identifier, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if identifier not in service._transfers:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_part_size_mismatch_discards_and_fails(tmp_path):
+    original = bytes(range(256)) * 800
+    sender_hello = _hello('Sender')
+    receiver_hello = _hello('Receiver')
+    transfer_id = str(uuid4())
+    digest = hashlib.sha256(original).hexdigest()
+    dest = tmp_path / 'dest.bin'
+    (tmp_path / 'dest.bin.part').write_bytes(original[:100])
+    ReceiveManifest.save(tmp_path, {'transfer_id': transfer_id, 'name': 'dest.bin',
+                                    'size': len(original), 'sha256': digest,
+                                    'held': 65536, 'peer_id': sender_hello.peer_id,
+                                    'session_id': sender_hello.session_id})
+    emit = Emitter()
+    receiver = TransferService(receiver_hello, emit)
+    first, second = socket.socketpair()
+    try:
+        offer = envelope('FILE_OFFER', sender_hello.peer_id, sender_hello.session_id,
+                         {'transfer_id': transfer_id, 'name': 'dest.bin',
+                          'size': len(original), 'sha256': digest,
+                          'to_session': receiver_hello.session_id,
+                          'resume_id': transfer_id})
+        receiver.receive(second, offer)
+        identifier = _wait_offer(emit)
+        assert receiver.decide(identifier, dest)
+        assert _wait_gone(receiver, identifier)
+        states = [d['state'] for k, d in emit.items
+                  if k == 'transfer' and d['id'] == identifier]
+        assert 'failed' in states
+        assert ReceiveManifest.load(tmp_path, 'dest.bin') is None
+    finally:
+        first.close()
+        receiver.stop()
+        assert receiver.join(5)

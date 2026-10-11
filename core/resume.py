@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,8 @@ MANIFEST_NAME = "resume.json"
 SEND_NAME = "send.json"
 MANIFEST_TTL_S = 604800
 MAX_FILE_SIZE = 1024 * 1024 * 1024
+
+_WRITE_LOCK = threading.Lock()
 
 
 def _now_ms() -> int:
@@ -40,14 +44,22 @@ def _check_digest(value: object) -> str:
     return value
 
 
+def _purge(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        return
+
+
 def _write_json(path: Path, record: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as stream:
-        stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(tmp, path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}-{secrets.token_hex(8)}.tmp")
+    with _WRITE_LOCK:
+        with tmp.open("w", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
     return path
 
 
@@ -127,12 +139,15 @@ class ReceiveManifest:
             clean = _check_name(name)
         except ValueError:
             return None
-        record = _read_json(Path(directory) / (clean + "." + MANIFEST_NAME))
+        path = Path(directory) / (clean + "." + MANIFEST_NAME)
+        record = _read_json(path)
         if record is None:
+            _purge(path)
             return None
         try:
             return _validate_receive(record)
         except ValueError:
+            _purge(path)
             return None
 
     @staticmethod
@@ -165,12 +180,15 @@ class SendManifest:
             clean = _check_uuid(transfer_id)
         except ValueError:
             return None
-        record = _read_json(Path(directory) / (clean + "." + SEND_NAME))
+        path = Path(directory) / (clean + "." + SEND_NAME)
+        record = _read_json(path)
         if record is None or record.get("transfer_id") != clean:
+            _purge(path)
             return None
         try:
             return _validate_send(record)
         except ValueError:
+            _purge(path)
             return None
 
     @staticmethod
@@ -198,9 +216,11 @@ class SendManifest:
                 continue
             record = _read_json(child)
             if record is None:
+                _purge(child)
                 continue
             try:
                 records.append(_validate_send(record))
             except ValueError:
+                _purge(child)
                 continue
         return records

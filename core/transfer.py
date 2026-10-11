@@ -96,6 +96,7 @@ class Transfer:
     cancel: threading.Event = field(default_factory=threading.Event)
     decision: threading.Event = field(default_factory=threading.Event)
     destination: Path | None = None
+    part: Path | None = None
     conn: socket.socket | None = None
     thread: threading.Thread | None = None
     last_progress: float = 0
@@ -162,6 +163,9 @@ class TransferService:
 
     def resume_pending(self, peer: Peer, directory: Path) -> str | None:
         """Re-offer one interrupted send; changed sources restart fresh."""
+        # The pre-hash below runs on the caller thread and stays bounded by
+        # the 1 GiB cap; call it from a worker, never from the Qt thread.
+        # Cancelled sends keep their manifest, so resume doubles as retry.
         if "file_v1" not in peer.hello.capabilities:
             raise TransferError("peer does not advertise file_v1")
         for record in SendManifest.scan(Path(directory)):
@@ -439,6 +443,12 @@ class TransferService:
             resume_dir, resume_name = destination.parent, destination.name
             manifest = ReceiveManifest.load(resume_dir, resume_name)
             part = resume_dir / (resume_name + ".part")
+            with self._lock:
+                for active in self._transfers.values():
+                    if (active.identifier != transfer.identifier
+                            and active.part is not None and active.part == part):
+                        raise TransferError("destination busy with another transfer")
+                transfer.part = part
             offset = 0
             if self._resume_match(manifest, offer, body):
                 assert manifest is not None
@@ -452,19 +462,18 @@ class TransferService:
                     part.unlink()
                 except OSError as error:
                     raise TransferError("cannot clear stale partial file") from error
-                ReceiveManifest.save(resume_dir, {
-                    "transfer_id": transfer.identifier, "name": resume_name,
-                    "size": body["size"], "sha256": body["sha256"], "held": 0,
-                    "peer_id": offer["peer_id"], "session_id": offer["session_id"]})
+                self._record_progress(resume_dir, transfer.identifier, resume_name,
+                                      body, offer, 0)
                 part.touch()
             else:
-                ReceiveManifest.save(resume_dir, {
-                    "transfer_id": transfer.identifier, "name": resume_name,
-                    "size": body["size"], "sha256": body["sha256"], "held": 0,
-                    "peer_id": offer["peer_id"], "session_id": offer["session_id"]})
+                self._record_progress(resume_dir, transfer.identifier, resume_name,
+                                      body, offer, 0)
                 part.touch()
             temporary = part
             with temporary.open("r+b") as stream:
+                if os.fstat(stream.fileno()).st_size != offset and offset:
+                    ReceiveManifest.discard(resume_dir, resume_name)
+                    raise TransferError("held bytes changed; restart the transfer")
                 stream.seek(offset)
                 self._write(transfer, "FILE_ACCEPT", offset=offset)
                 accepted = True
@@ -491,10 +500,8 @@ class TransferService:
                         raise TransferError("chunk exceeds offered size or chunk limit")
                     stream.write(chunk)
                     count += len(chunk)
-                    ReceiveManifest.save(resume_dir, {
-                        "transfer_id": transfer.identifier, "name": resume_name,
-                        "size": body["size"], "sha256": body["sha256"], "held": count,
-                        "peer_id": offer["peer_id"], "session_id": offer["session_id"]})
+                    self._record_progress(resume_dir, transfer.identifier,
+                                          resume_name, body, offer, count)
                     self._progress(transfer, "written", count, body["size"])
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -523,6 +530,23 @@ class TransferService:
                     temporary.unlink()
                 except OSError as error:
                     logging.error("Cannot remove transfer temporary file %s: %s", temporary, error)
+
+    def _record_progress(self, resume_dir: Path, identifier: str, name: str,
+                         body: dict[str, Any], offer: dict[str, Any], held: int) -> None:
+        # Bookkeeping must never kill a transfer: a failed save only means a
+        # later resume restarts from an older offset or from zero.
+        record = {
+            "transfer_id": identifier, "name": name,
+            "size": body["size"], "sha256": body["sha256"], "held": held,
+            "peer_id": offer["peer_id"], "session_id": offer["session_id"]}
+        for attempt in range(5):
+            try:
+                ReceiveManifest.save(resume_dir, record)
+                return
+            except OSError as error:
+                if attempt == 4:
+                    logging.debug("Resume bookkeeping failed: %s", error)
+                time.sleep(0.02)
 
     @staticmethod
     def _resume_match(manifest: dict[str, Any] | None, offer: dict[str, Any],

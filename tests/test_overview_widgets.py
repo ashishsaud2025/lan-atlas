@@ -33,7 +33,7 @@ def test_tokens_match_design_frontmatter() -> None:
     assert COLORS["primary"] == "#46efcf"
     assert COLORS["surface-container-low"] == "#0d1c2d"
     assert SPACE == {"xs": 4, "sm": 8, "md": 12, "lg": 20, "xl": 28}
-    assert RADIUS["DEFAULT"] == 8 and RADIUS["full"] == 9999
+    assert RADIUS["DEFAULT"] == 12 and RADIUS["full"] == 9999
     assert FONTS["ui"] == "Inter" and FONTS["mono"] == "JetBrains Mono"
 
 
@@ -313,3 +313,11 @@ def test_font_loader_falls_back_without_bundled_files(
     monkeypatch.setattr(fonts, "_FONT_DIR", tmp_path / "no-fonts-here")
     fonts.ensure_application_fonts(app_instance)
     assert fonts.mono_family()
+
+
+def test_refined_tokens_match_design() -> None:
+    from gui.theme.tokens import COLORS, FONTS, RADIUS
+    assert COLORS['surface'] == '#060a10'
+    assert COLORS['surface-container'] == '#131b28'
+    assert RADIUS['DEFAULT'] == 12
+    assert FONTS['styles']['body-md']['size'] == 14

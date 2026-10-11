@@ -129,6 +129,22 @@ def primary_action(text: str, callback: Callable[[], None]) -> QPushButton:
     return action_button(text, callback, primary=True)
 
 
+def empty_state(explanation: str, action_text: str,
+                callback: Callable[[], None]) -> QFrame:
+    """Build a guidance card with an explanation and one next action."""
+    frame = QFrame()
+    frame.setProperty("card", True)
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(SPACING["lg"], SPACING["lg"],
+                              SPACING["lg"], SPACING["lg"])
+    detail = QLabel(explanation)
+    detail.setObjectName("PageSubtitle")
+    detail.setWordWrap(True)
+    layout.addWidget(detail)
+    layout.addWidget(primary_action(action_text, callback))
+    return frame
+
+
 def _navigation_icon(page: str) -> QIcon:
     """Draw restrained monochrome navigation glyphs without icon-font dependencies."""
     pixmap = QPixmap(36, 36)

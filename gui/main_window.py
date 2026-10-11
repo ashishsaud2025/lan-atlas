@@ -37,7 +37,7 @@ from core.roster import Peer
 from core.secure_transport import PairingCandidate, SecureTransportError
 from core.services import (DirectoryEntry, DirectoryKind, LocalServiceDirectory,
                            browser_url)
-from gui.components import NavigationRail, action_button, page_header
+from gui.components import NavigationRail, action_button, empty_state, page_header
 from gui.pages.devices import FILTER_TABS, filter_tabs, identity_block, tab_counts
 from gui.pages.network import hud_selected_block, metric_value, toolbar_title
 from gui.pages.overview import (activity_log, hero, inspector_row, metric_card,
@@ -744,6 +744,10 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.recipient)
         control_layout.addWidget(self.room_explainer)
         layout.addWidget(controls)
+        self.messages_empty = empty_state(
+            "No messages yet. Pick the nearby room or a peer above, write below, and Send.",
+            "Write a message", self._focus_message_input)
+        layout.addWidget(self.messages_empty)
         self.message_view = QListView()
         self.message_view.setModel(self.message_model)
         self.message_view.setAccessibleName("Message history")
@@ -761,7 +765,21 @@ class MainWindow(QMainWindow):
         compose.addWidget(self.input, 1)
         compose.addWidget(self.send_button)
         layout.addLayout(compose)
+        self.message_model.rowsInserted.connect(self._refresh_messages_empty)
+        self.message_model.rowsRemoved.connect(self._refresh_messages_empty)
+        self.message_model.modelReset.connect(self._refresh_messages_empty)
+        self._refresh_messages_empty()
         return page
+
+    @Slot()
+    def _focus_message_input(self) -> None:
+        """Focus the composer from the Messages empty state."""
+        self.input.setFocus()
+
+    @Slot()
+    def _refresh_messages_empty(self) -> None:
+        """Show guidance while the room history is empty."""
+        self.messages_empty.setVisible(self.message_model.rowCount() == 0)
 
     def _build_files_page(self) -> QWidget:
         page, layout = self._page(
@@ -779,9 +797,14 @@ class MainWindow(QMainWindow):
         self.files_count = QLabel("No finished transfers yet")
         self.files_count.setObjectName("PageSubtitle")
         layout.addWidget(self.files_count)
+        self.files_empty = empty_state(
+            "No finished transfers yet. Send a file from Transfers to a selected peer.",
+            "Send a file", self.send_file)
+        layout.addWidget(self.files_empty)
         self.files_proxy.rowsInserted.connect(self._refresh_files_count)
         self.files_proxy.rowsRemoved.connect(self._refresh_files_count)
         self.files_proxy.modelReset.connect(self._refresh_files_count)
+        self._refresh_files_count()
         return page
 
     @Slot()
@@ -791,6 +814,7 @@ class MainWindow(QMainWindow):
         self.files_count.setText(
             "No finished transfers yet" if count == 0 else
             f"{count} finished transfer{'s' if count != 1 else ''} kept locally")
+        self.files_empty.setVisible(count == 0)
 
     def _build_transfers_page(self) -> QWidget:
         page, layout = self._page(
@@ -856,6 +880,14 @@ class MainWindow(QMainWindow):
         self.feed_view.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(self.feed_view, 1)
+        self.feed_empty = empty_state(
+            "No posts yet. Publish below or sync a posts-capable peer above.",
+            "Write a post", self._focus_post_input)
+        layout.addWidget(self.feed_empty)
+        self.post_model.rowsInserted.connect(self._refresh_feed_empty)
+        self.post_model.rowsRemoved.connect(self._refresh_feed_empty)
+        self.post_model.modelReset.connect(self._refresh_feed_empty)
+        self._refresh_feed_empty()
         compose = QHBoxLayout()
         self.post_input = QLineEdit()
         self.post_input.setMaxLength(4096)
@@ -866,8 +898,7 @@ class MainWindow(QMainWindow):
         compose.addWidget(self.post_input, 1)
         compose.addWidget(self.publish_button)
         layout.addLayout(compose)
-        note = QLabel(
-            "Publishing stores the post locally. Other peers receive it only when they synchronize.")
+        note = QLabel(            "Publishing stores the post locally. Other peers receive it only when they synchronize.")
         note.setObjectName("PageSubtitle")
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -877,6 +908,16 @@ class MainWindow(QMainWindow):
         self.feed_log.setVisible(False)
         layout.addWidget(self.feed_log)
         return page
+
+    @Slot()
+    def _focus_post_input(self) -> None:
+        """Focus the composer from the Feed empty state."""
+        self.post_input.setFocus()
+
+    @Slot()
+    def _refresh_feed_empty(self) -> None:
+        """Show guidance while the local feed is empty."""
+        self.feed_empty.setVisible(self.post_model.rowCount() == 0)
 
     def _build_directory_page(self) -> QWidget:
         page, layout = self._page(

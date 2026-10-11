@@ -166,7 +166,7 @@ def _stylesheet(c: dict[str, str], technical: str) -> str:
         QLabel#PageSubtitle {{ color: {c['secondary']}; font-size: {TYPOGRAPHY['body_small']}px; }}
         QLabel#StatusIdentity, QLabel#SecurityHeading {{ font-weight: 700; }}
         QLabel#BodyText {{ font-size: 14px; }}
-        QLabel#MetricValue {{ font-size: 25px; font-weight: 700; color: {c['accent']}; }}
+        QLabel#MetricValue {{ font-size: 25px; font-weight: 700; color: {c['ink']}; }}
         QLabel#MetricLabel {{ color: {c['secondary']}; }}
         QLabel#TechnicalDetail, QLabel[technical="true"], QLineEdit[technical="true"],
         QSpinBox[technical="true"], QTextEdit[technical="true"] {{
@@ -175,7 +175,7 @@ def _stylesheet(c: dict[str, str], technical: str) -> str:
         QLabel#SectionLabel {{
             color: {c['secondary']}; font-size: 10px; font-weight: 700;
         }}
-        QLabel#PanelTitle {{ color: {c['ink']}; font-size: 15px; font-weight: 600; }}
+        QLabel#PanelTitle {{ color: {c['ink']}; font-size: 18px; font-weight: 600; }}
         QLabel#Eyebrow {{ color: {c['secondary']}; font-size: 10px; font-weight: 700; }}
         QLabel#HeaderMetric {{
             color: {c['ink']}; background: {c['surface_low']};

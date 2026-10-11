@@ -59,3 +59,25 @@ def test_overview_hero_toggles_service(app: object, window: object) -> None:
     QTest.mouseClick(window.hero_action, Qt.MouseButton.LeftButton)
     assert window.hero_action.text() == 'Stop session'
     assert not window.hero_action.isEnabled()
+
+
+def test_empty_states_guide_next_action(app: object, window: object) -> None:
+    from PySide6.QtWidgets import QLabel
+
+    from gui.components import empty_state
+    widget = empty_state('No messages yet', 'Start chatting', lambda: None)
+    texts = [child.text() for child in widget.findChildren(QLabel)]
+    assert any('No messages yet' in text for text in texts)
+    assert not window.messages_empty.isHidden()
+    assert not window.files_empty.isHidden()
+    assert not window.feed_empty.isHidden()
+
+
+def test_messages_empty_hides_on_first_row(app: object, window: object) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from gui.models import MessageEntry
+    assert not window.messages_empty.isHidden()
+    window.message_model.append(MessageEntry('id-1', 'Peer', 'hi', 'room', 'accepted', False, 0))
+    QApplication.processEvents()
+    assert window.messages_empty.isHidden()

@@ -124,6 +124,7 @@ def main() -> int:
     window = MainWindow(service, portal_public_dir=args.public_dir)
     window.show()
     service.start()
+    window.mark_service_started()
     try:
         return app.exec()
     finally:

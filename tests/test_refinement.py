@@ -48,3 +48,14 @@ def test_nav_badges_show_counts_and_clamp(app: object, window: object) -> None:
     assert "99+" in window.navigation.page_items[2].text()
     window.navigation.set_badge(2, "")
     assert window.navigation.page_items[2].text() == "Devices"
+
+
+def test_overview_hero_toggles_service(app: object, window: object) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    assert window.hero_action.text() == 'Start session'
+    QTest.mouseClick(window.hero_action, Qt.MouseButton.LeftButton)
+    assert window.hero_action.text() == 'Stop session'
+    QTest.mouseClick(window.hero_action, Qt.MouseButton.LeftButton)
+    assert window.hero_action.text() == 'Stop session'
+    assert not window.hero_action.isEnabled()

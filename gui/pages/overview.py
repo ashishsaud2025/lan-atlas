@@ -4,11 +4,14 @@ Callers pass repository snapshots in and keep owning signal connections."""
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QVBoxLayout,
-                                 QWidget)
+from collections.abc import Callable
+
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
+                               QWidget)
 
 from core.peer_repository import OverviewSummary, PeerRecord, TrustState
 from core.discovery import Hello
+from gui.components import primary_action
 from gui.models import ActivityListModel
 from gui.theme.tokens import SPACE
 from gui.widgets.activity_log import ActivityLogWidget
@@ -33,6 +36,26 @@ def metric_card(title: str, initial: str) -> tuple[QFrame, MonoLabel]:
     layout.addWidget(label)
     layout.addWidget(value)
     return frame, value
+
+
+def hero(on_toggle: Callable[[], None]) -> tuple[QFrame, MonoLabel, QPushButton]:
+    """Build the Overview hero with a big count and one session action."""
+    frame = QFrame()
+    frame.setProperty("card", True)
+    layout = QHBoxLayout(frame)
+    layout.setContentsMargins(SPACE["lg"], SPACE["lg"], SPACE["lg"], SPACE["lg"])
+    count = MonoLabel("0")
+    count.setObjectName("HeroCount")
+    count.setStyleSheet("font-size: 44px; font-weight: 700;")
+    text = QVBoxLayout()
+    caption = MonoLabel("sessions nearby")
+    caption.setObjectName("MetricLabel")
+    text.addWidget(count)
+    text.addWidget(caption)
+    layout.addLayout(text, 1)
+    action = primary_action("Start session", on_toggle)
+    layout.addWidget(action, 0)
+    return frame, count, action
 
 
 def radar_map(local: Hello, mode: str) -> RadarMapWidget:

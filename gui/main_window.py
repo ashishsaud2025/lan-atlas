@@ -40,9 +40,9 @@ from core.services import (DirectoryEntry, DirectoryKind, LocalServiceDirectory,
 from gui.components import NavigationRail, action_button, page_header
 from gui.pages.devices import FILTER_TABS, filter_tabs, identity_block, tab_counts
 from gui.pages.network import hud_selected_block, metric_value, toolbar_title
-from gui.pages.overview import (activity_log, inspector_row, metric_card,
-                                radar_map, refresh_distribution,
-                                state_pill_for, trust_pill)
+from gui.pages.overview import (activity_log, hero, inspector_row, metric_card,
+                                 radar_map, refresh_distribution,
+                                 state_pill_for, trust_pill)
 from gui.widgets.header_icon import header_icon
 from gui.widgets.mono_label import MonoLabel
 from gui.widgets.peer_row import (PeerRowDelegate, PeerTableDelegate,
@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         if app is not None:
             self.theme_mode = apply_theme(app, self.theme_mode)
         self.service = service
+        self._service_running = False
         if portal is not None:
             content = portal.content
             if (content.hello != service.hello
@@ -307,6 +308,8 @@ class MainWindow(QMainWindow):
         page, layout = self._page(
             "Local network overview",
             "Live observations from this LAN Manager session.", True)
+        hero_frame, self.hero_count, self.hero_action = hero(self._toggle_session)
+        layout.addWidget(hero_frame)
         self.overview_metrics = QGridLayout()
         nearby_card, self.nearby_value = metric_card("Nearby sessions", "Searching...")
         capability_card, self.capability_value = metric_card(
@@ -1784,6 +1787,34 @@ class MainWindow(QMainWindow):
         self.append("Discovery announcement selection applied live.",
                     "Network")
 
+    def mark_service_started(self) -> None:
+        """Record a launcher-owned service start so the hero stays truthful."""
+        self._service_running = True
+        self._refresh_hero()
+
+    @Slot()
+    def _toggle_session(self) -> None:
+        """Start the session once or stop it; restarts need a new launch."""
+        if not self._service_running:
+            try:
+                self.service.start()
+            except RuntimeError:
+                pass
+            self._service_running = True
+        else:
+            self.service.stop()
+            self.hero_action.setEnabled(False)
+            self.hero_action.setToolTip("Restart the app for a new session")
+        self._refresh_hero()
+
+    def _refresh_hero(self) -> None:
+        """Mirror the live service state on the Overview hero."""
+        running = self._service_running
+        self.hero_action.setText("Stop session" if running else "Start session")
+        if hasattr(self, "hero_count") and hasattr(self, "peer_records"):
+            nearby = sum(record.nearby for record in self.peer_records)
+            self.hero_count.setText(str(nearby))
+
     @Slot()
     def _start_portal(self) -> None:
         """Start the browser portal on the explicitly selected address."""
@@ -2534,6 +2565,7 @@ class MainWindow(QMainWindow):
         self._show_peer(self._record_in_snapshot(self.peer_selection.session_id))
         self.nearby_status.setText(f"{len(nearby)} sessions nearby")
         self.navigation.set_badge(PAGE_DEVICES, str(len(nearby)) if nearby else "")
+        self._refresh_hero()
         self.network_status.setText("Discovery active · application listener configured")
         stale_count = len(records) - len(nearby)
         paired_count = sum(

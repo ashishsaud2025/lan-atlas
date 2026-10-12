@@ -79,7 +79,8 @@ public class MainActivity extends Activity {
     private static final int PAGE_DEVICES = 2;
     private static final int PAGE_WORKBENCH = 3;
     private static final int PAGE_CHAT = 4;
-    private static final int PAGE_MORE = 5;
+    private static final int PAGE_FEED = 5;
+    private static final int PAGE_MORE = 6;
     private static final int REQUEST_OPEN_FILE = 100;
     private static final int REQUEST_CREATE_FILE = 101;
     private static final int VERIFY_TIMEOUT_MS = 300000;
@@ -106,6 +107,11 @@ public class MainActivity extends Activity {
     private Button chat_scope_room;
     private Button chat_scope_dm;
     private Button chat_send;
+    private TextView feed_status;
+    private TextView feed_list;
+    private EditText feed_input;
+    private Button feed_sync;
+    private Button feed_publish;
     private boolean chat_dm;
     private LinearLayout device_list;
     private ObservedTopologyView topology_view;
@@ -220,6 +226,8 @@ public class MainActivity extends Activity {
         chat_scope_room.setOnClickListener(view -> choose_chat_scope(false));
         chat_scope_dm.setOnClickListener(view -> choose_chat_scope(true));
         chat_send.setOnClickListener(view -> send_chat_from_composer());
+        feed_sync.setOnClickListener(view -> sync_feed_from_page());
+        feed_publish.setOnClickListener(view -> publish_feed_from_composer());
         send_file_button.setOnClickListener(view -> choose_file_to_send());
         accept_file_button.setOnClickListener(view -> accept_incoming_file());
         decline_file_button.setOnClickListener(view -> decline_incoming_file());
@@ -257,6 +265,11 @@ public class MainActivity extends Activity {
         chat_scope_room = findViewById(R.id.chat_scope_room);
         chat_scope_dm = findViewById(R.id.chat_scope_dm);
         chat_send = findViewById(R.id.chat_send);
+        feed_status = findViewById(R.id.feed_status);
+        feed_list = findViewById(R.id.feed_list);
+        feed_input = findViewById(R.id.feed_input);
+        feed_sync = findViewById(R.id.feed_sync);
+        feed_publish = findViewById(R.id.feed_publish);
         device_list = findViewById(R.id.device_list);
         topology_view = findViewById(R.id.topology_view);
         transfer_progress = findViewById(R.id.transfer_progress);
@@ -267,11 +280,12 @@ public class MainActivity extends Activity {
         cancel_transfer_button = findViewById(R.id.cancel_transfer_button);
         pages = new View[]{findViewById(R.id.page_overview), findViewById(R.id.page_network),
             findViewById(R.id.page_devices), findViewById(R.id.page_workbench),
-            findViewById(R.id.page_chat), findViewById(R.id.page_more)};
+            findViewById(R.id.page_chat), findViewById(R.id.page_feed),
+            findViewById(R.id.page_more)};
         navigation = new Button[]{findViewById(R.id.nav_overview),
             findViewById(R.id.nav_network), findViewById(R.id.nav_devices),
             findViewById(R.id.nav_workbench), findViewById(R.id.nav_chat),
-            findViewById(R.id.nav_more)};
+            findViewById(R.id.nav_feed), findViewById(R.id.nav_more)};
     }
 
     private void setup_navigation() {
@@ -583,6 +597,7 @@ public class MainActivity extends Activity {
                 }
             }
             update_chat_ui(session);
+            update_feed_ui(session);
         });
     }
 
@@ -596,6 +611,7 @@ public class MainActivity extends Activity {
         selected_target.setText(getString(R.string.selected_target_format,
             peer.name, peer.ip, peer.tcp_port));
         update_chat_ui(current);
+        update_feed_ui(current);
         show_page(PAGE_WORKBENCH);
     }
 
@@ -894,7 +910,59 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             if (session != null && current != session) return;
             if (session == null && current != null) return;
+            Session active = current;
+            PeerSnapshot peer = selected_peer;
+            boolean live = active != null && active.running && peer != null
+                && peer.has_capability("posts_v1");
+            if (peer == null) {
+                feed_status.setText(R.string.no_selected_device);
+            } else {
+                feed_status.setText(getString(R.string.selected_target_format,
+                    peer.name, peer.ip, peer.tcp_port));
+            }
+            feed_sync.setEnabled(live);
+            StringBuilder posts = new StringBuilder();
+            if (active != null) {
+                for (java.util.Map<String, Object> post
+                        : active.feed_posts.ordered(FeedRules.CACHE_BOUND, null)) {
+                    String author = (String) post.get("author_id");
+                    String label = peer_id.equals(author) ? "phone post" : author;
+                    if (peer != null && peer.peer_id.equals(author)) label = peer.name;
+                    posts.append(label).append(" | ").append(post.get("text")).append('\n');
+                }
+            }
+            feed_list.setText(posts.length() == 0
+                ? getString(R.string.feed_empty) : posts.toString());
         });
+    }
+
+    private void sync_feed_from_page() {
+        Session session = current;
+        PeerSnapshot peer = selected_peer;
+        if (session == null || !session.running || peer == null
+                || !peer.has_capability("posts_v1")) {
+            report(session, getString(R.string.feed_no_peer));
+            return;
+        }
+        sync_feed(peer);
+    }
+
+    private void publish_feed_from_composer() {
+        Session session = current;
+        if (session == null || !session.running) {
+            report(session, getString(R.string.feed_no_peer));
+            return;
+        }
+        String text = feed_input.getText().toString();
+        if (!FeedRules.validText(text)) {
+            feed_input.setError(getString(R.string.feed_invalid_text));
+            return;
+        }
+        feed_input.setError(null);
+        feed_input.setText("");
+        session.feed_posts.putValidated(UUID.randomUUID().toString(), peer_id,
+            text, System.currentTimeMillis());
+        update_feed_ui(session);
     }
 
     private void send_chat(PeerSnapshot peer, String scope, String text) {        Session session = current;

@@ -313,6 +313,47 @@
         </ScrollView>
 
         <ScrollView
+            android:id="@+id/page_feed"
+            android:layout_width="match_parent" android:layout_height="match_parent"
+            android:fillViewport="true" android:visibility="gone">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:padding="16dp">
+                <TextView style="@style/Widget.LanAtlas.Title"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="@string/feed_title" />
+                <TextView style="@style/Widget.LanAtlas.Subtitle"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginBottom="12dp" android:text="@string/feed_subtitle" />
+                <LinearLayout style="@style/Widget.LanAtlas.Card"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                    <TextView android:id="@+id/feed_status" style="@style/Widget.LanAtlas.Label"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:text="@string/no_selected_device" />
+                    <Button android:id="@+id/feed_sync" style="@style/Widget.LanAtlas.Button.Primary"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:enabled="false"
+                        android:text="@string/feed_sync" />
+                    <TextView android:id="@+id/feed_list" style="@style/Widget.LanAtlas.Card"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:fontFamily="monospace"
+                        android:minHeight="180dp" android:text="@string/feed_empty"
+                        android:textColor="?attr/lanPrimaryText" android:textIsSelectable="true"
+                        android:textSize="12sp" />
+                    <EditText android:id="@+id/feed_input" style="@style/Widget.LanAtlas.Input"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:hint="@string/feed_hint"
+                        android:importantForAutofill="no" android:inputType="textMultiLine"
+                        android:maxLength="5000" android:minLines="2" />
+                    <Button android:id="@+id/feed_publish" style="@style/Widget.LanAtlas.Button"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/feed_publish" />
+                </LinearLayout>
+            </LinearLayout>
+        </ScrollView>
+
+        <ScrollView
             android:id="@+id/page_more"
             android:layout_width="match_parent" android:layout_height="match_parent"
             android:fillViewport="true" android:visibility="gone">
@@ -395,6 +436,9 @@
         <Button android:id="@+id/nav_chat" style="@style/Widget.LanAtlas.NavButton"
             android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
             android:text="@string/chat" />
+        <Button android:id="@+id/nav_feed" style="@style/Widget.LanAtlas.NavButton"
+            android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+            android:text="@string/feed" />
         <Button android:id="@+id/nav_more" style="@style/Widget.LanAtlas.NavButton"
             android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
             android:text="@string/more" />

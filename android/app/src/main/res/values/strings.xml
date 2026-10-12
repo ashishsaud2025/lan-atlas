@@ -65,7 +65,7 @@
     <string name="session_id">Session ID</string>
     <string name="no_active_session">No active session</string>
     <string name="protocol_ports">UDP discovery 50000 · TCP ECHO 50002</string>
-    <string name="prototype_scope">This Android prototype supports discovery, ECHO, one bidirectional file transfer at a time, and room plus DM chat. Posts are not implemented on Android yet.</string>
+    <string name="prototype_scope">This Android prototype supports discovery, ECHO, one bidirectional file transfer at a time, room plus DM chat, and feed sync plus phone posts.</string>
     <string name="lifecycle_explanation">Networking stops when this activity leaves the foreground. Returning does not silently restart it.</string>
     <string name="name_error">Name must contain 1 to 80 characters</string>
     <string name="probe_input_error">Start networking and enter a target host</string>
@@ -102,7 +102,16 @@
     <string name="chat_no_peer">Select a session advertising chat_v1 first</string>
     <string name="chat_failed">Message failed: %1$s</string>
     <string name="chat_unaccepted">No acceptance from %1$s · marked uncertain</string>
-    <string name="feed_synced">Feed sync · %1$d added · %2$d duplicates</string>
+    <string name="feed">Feed</string>
+    <string name="feed_title">Local and cached posts</string>
+    <string name="feed_subtitle">Sync posts from a selected session advertising posts_v1. Posts are unsigned and unverified.</string>
+    <string name="feed_sync">Sync selected session</string>
+    <string name="feed_hint">Post up to 5000 characters</string>
+    <string name="feed_publish">Publish phone post</string>
+    <string name="feed_empty">No posts yet</string>
+    <string name="feed_invalid_text">Post must contain 1 to 5000 characters</string>
+    <string name="feed_no_peer">Select a session advertising posts_v1 first</string>
+    <string name="feed_synced">Feed sync · new %1$d · known %2$d</string>
     <string name="feed_failed">Feed sync failed: %1$s</string>
     <string name="transfer_sent">Verified by receiver · %1$s</string>
     <string name="transfer_received">Verified and saved · %1$s</string>

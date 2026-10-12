@@ -831,8 +831,73 @@ public class MainActivity extends Activity {
         Frames.send(socket.getOutputStream(), reply.toString());
     }
 
-    private void send_chat(PeerSnapshot peer, String scope, String text) {
+    private void sync_feed(PeerSnapshot peer) {
         Session session = current;
+        if (session == null || !session.running || peer == null
+                || !peer.has_capability("posts_v1")) {
+            return;
+        }
+        try {
+            session.workers.execute(() -> pull_feed(session, peer));
+        } catch (RejectedExecutionException error) {
+            report(session, getString(R.string.feed_failed, error));
+        }
+    }
+
+    private void pull_feed(Session session, PeerSnapshot peer) {
+        int added = 0;
+        int duplicates = 0;
+        try (Socket socket = new Socket()) {
+            session.sockets.add(socket);
+            try {
+                socket.connect(new InetSocketAddress(peer.ip, peer.tcp_port), 3000);
+                JSONObject cursor = null;
+                for (int page = 0; page < 20 && session.running; page++) {
+                    JSONObject body = new JSONObject().put("limit", FeedRules.PAGE_LIMIT);
+                    if (cursor != null) body.put("cursor", cursor);
+                    Frames.send(socket.getOutputStream(),
+                        message(session, "POST_QUERY", body).toString());
+                    JSONObject reply = receive(socket, 5000);
+                    if (reply == null || !"POST_PAGE".equals(reply.getString("type"))) {
+                        throw new IOException("Expected POST_PAGE");
+                    }
+                    JSONObject reply_body = reply.getJSONObject("body");
+                    JSONArray posts = reply_body.getJSONArray("posts");
+                    java.util.List<java.util.Map<String, String>> maps = new java.util.ArrayList<>();
+                    for (int index = 0; index < posts.length(); index++) {
+                        JSONObject post = posts.getJSONObject(index);
+                        java.util.Map<String, String> fields = new java.util.HashMap<>();
+                        fields.put("post_id", post.optString("post_id", ""));
+                        fields.put("author_id", post.optString("author_id", ""));
+                        fields.put("text", post.optString("text", ""));
+                        fields.put("created_ms", Long.toString(post.optLong("created_ms", -1)));
+                        maps.add(fields);
+                    }
+                    int merged = session.feed_posts.mergeInto(maps);
+                    added += merged;
+                    duplicates += maps.size() - merged;
+                    if (reply_body.optBoolean("complete", true)) break;
+                    cursor = reply_body.optJSONObject("next_cursor");
+                    if (cursor == null) break;
+                }
+                report(session, getString(R.string.feed_synced, added, duplicates));
+            } finally {
+                session.sockets.remove(socket);
+            }
+        } catch (Exception error) {
+            report(session, getString(R.string.feed_failed, error));
+        }
+        update_feed_ui(session);
+    }
+
+    private void update_feed_ui(Session session) {
+        runOnUiThread(() -> {
+            if (session != null && current != session) return;
+            if (session == null && current != null) return;
+        });
+    }
+
+    private void send_chat(PeerSnapshot peer, String scope, String text) {        Session session = current;
         if (session == null || !session.running || peer == null
                 || !peer.has_capability("chat_v1")) {
             return;

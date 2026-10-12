@@ -44,6 +44,15 @@ public final class FeedRulesTest {
         assertEquals(1, cache.ordered(50, null).size());
     }
 
+    @Test public void duplicate_ids_merge_once() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        String id = "00000000-0000-4000-8000-000000000001";
+        String author = "00000000-0000-4000-8000-000000000002";
+        assertEquals(1, cache.putValidated(id, author, "hi", 1));
+        assertEquals(0, cache.putValidated(id, author, "hi", 1));
+        assertEquals(1, cache.ordered(50, null).size());
+    }
+
     @Test public void paging_honors_limit_and_cursor() {
         FeedRules.FeedCache cache = new FeedRules.FeedCache();
         for (int index = 0; index < 5; index++) {

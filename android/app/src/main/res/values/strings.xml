@@ -106,10 +106,10 @@
     <string name="feed_title">Local and cached posts</string>
     <string name="feed_subtitle">Sync posts from a selected session advertising posts_v1. Posts are unsigned and unverified.</string>
     <string name="feed_sync">Sync selected session</string>
-    <string name="feed_hint">Post up to 5000 characters</string>
+    <string name="feed_hint">Post up to 4096 characters</string>
     <string name="feed_publish">Publish phone post</string>
     <string name="feed_empty">No posts yet</string>
-    <string name="feed_invalid_text">Post must contain 1 to 5000 characters</string>
+    <string name="feed_invalid_text">Post must contain 1 to 4096 characters</string>
     <string name="feed_no_peer">Select a session advertising posts_v1 first</string>
     <string name="feed_synced">Feed sync · new %1$d · known %2$d</string>
     <string name="feed_failed">Feed sync failed: %1$s</string>

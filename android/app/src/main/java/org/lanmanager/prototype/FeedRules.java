@@ -10,7 +10,7 @@ import java.util.UUID;
 
 /** Shared feed rules mirroring the desktop post paging contract. */
 public final class FeedRules {
-    public static final int MAX_TEXT = 5000;
+    public static final int MAX_TEXT = 4096;
     public static final int PAGE_LIMIT = 50;
     public static final int CACHE_BOUND = 200;
 
@@ -65,6 +65,7 @@ public final class FeedRules {
 
         public synchronized int mergeInto(List<Map<String, String>> page) {
             List<Map<String, Object>> staged = new ArrayList<>();
+            java.util.Set<String> staged_ids = new java.util.HashSet<>();
             for (Map<String, String> raw : page) {
                 String id = raw.get("post_id");
                 String author = raw.get("author_id");
@@ -73,10 +74,13 @@ public final class FeedRules {
                 try {
                     created = Long.parseLong(raw.get("created_ms"));
                 } catch (NumberFormatException | NullPointerException error) {
-                    return 0;
+                    throw new IllegalArgumentException("Invalid post created_ms", error);
                 }
-                if (!validUuid(id) || !validUuid(author) || !validText(text)) return 0;
-                if (posts.containsKey(id)) continue;
+                if (!validUuid(id) || !validUuid(author) || !validText(text)
+                        || created < 0) {
+                    throw new IllegalArgumentException("Invalid post in page");
+                }
+                if (posts.containsKey(id) || !staged_ids.add(id)) continue;
                 Map<String, Object> post = new LinkedHashMap<>();
                 post.put("post_id", id);
                 post.put("author_id", author);
@@ -91,6 +95,37 @@ public final class FeedRules {
                 }
             }
             return staged.size();
+        }
+
+        /** One author-filtered page slice with its completion flag. */
+        public static final class FeedPage {
+            public final List<Map<String, Object>> posts;
+            public final boolean complete;
+
+            FeedPage(List<Map<String, Object>> posts, boolean complete) {
+                this.posts = posts;
+                this.complete = complete;
+            }
+        }
+
+        public synchronized FeedPage page(int limit, Map<String, Object> cursor,
+                                          String author) {
+            String lastAuthor = cursor == null ? null : (String) cursor.get("last_author");
+            String lastPost = cursor == null ? null : (String) cursor.get("last_post");
+            List<Map<String, Object>> sorted = new ArrayList<>(posts.values());
+            Collections.sort(sorted, Comparator.comparing(
+                post -> sortKey((String) post.get("author_id"), (String) post.get("post_id"))));
+            List<Map<String, Object>> matching = new ArrayList<>();
+            for (Map<String, Object> post : sorted) {
+                if (author != null && !author.equals(post.get("author_id"))) continue;
+                if (afterCursor(lastAuthor, lastPost,
+                        (String) post.get("author_id"), (String) post.get("post_id"))) {
+                    matching.add(Collections.unmodifiableMap(post));
+                }
+            }
+            int count = Math.min(Math.max(limit, 1), PAGE_LIMIT);
+            boolean complete = matching.size() <= count;
+            return new FeedPage(matching.subList(0, Math.min(count, matching.size())), complete);
         }
 
         public synchronized List<Map<String, Object>> ordered(int limit,

@@ -40,8 +40,37 @@ public final class FeedRulesTest {
         good.put("author_id", AUTHOR);
         good.put("text", "hi");
         good.put("created_ms", "2");
-        assertEquals(0, cache.mergeInto(java.util.Arrays.asList(bad, good)));
+        try {
+            cache.mergeInto(java.util.Arrays.asList(bad, good));
+            assertFalse("invalid page must throw", true);
+        } catch (IllegalArgumentException expected) {
+        }
         assertEquals(1, cache.ordered(50, null).size());
+    }
+
+    @Test public void staged_duplicates_count_once() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        java.util.Map<String, String> post = new java.util.HashMap<>();
+        post.put("post_id", ID);
+        post.put("author_id", AUTHOR);
+        post.put("text", "hi");
+        post.put("created_ms", "1");
+        assertEquals(1, cache.mergeInto(java.util.Arrays.asList(post, post)));
+        assertEquals(1, cache.ordered(50, null).size());
+    }
+
+    @Test public void author_page_filters_before_limit() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        String other = "00000000-0000-4000-8000-000000000003";
+        for (int index = 0; index < 4; index++) {
+            String id = String.format("00000000-0000-4000-8000-%012d", index);
+            assertEquals(1, cache.putValidated(id, other, "post", index));
+        }
+        String mine = "00000000-0000-4000-8000-000000000009";
+        assertEquals(1, cache.putValidated(mine, AUTHOR, "mine", 9));
+        FeedRules.FeedCache.FeedPage page = cache.page(2, null, AUTHOR);
+        assertEquals(1, page.posts.size());
+        assertTrue(page.complete);
     }
 
     @Test public void duplicate_ids_merge_once() {

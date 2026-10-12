@@ -344,7 +344,7 @@
                         android:layout_width="match_parent" android:layout_height="wrap_content"
                         android:layout_marginTop="8dp" android:hint="@string/feed_hint"
                         android:importantForAutofill="no" android:inputType="textMultiLine"
-                        android:maxLength="5000" android:minLines="2" />
+                        android:maxLength="4096" android:minLines="2" />
                     <Button android:id="@+id/feed_publish" style="@style/Widget.LanAtlas.Button"
                         android:layout_width="match_parent" android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"

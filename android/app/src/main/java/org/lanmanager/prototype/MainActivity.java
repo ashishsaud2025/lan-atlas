@@ -779,25 +779,17 @@ public class MainActivity extends Activity {
             cursor_map.put("last_author", cursor.optString("last_author", null));
             cursor_map.put("last_post", cursor.optString("last_post", null));
         }
-        java.util.List<java.util.Map<String, Object>> page =
-            session.feed_posts.ordered(limit, cursor_map);
-        if (author != null) {
-            java.util.List<java.util.Map<String, Object>> filtered = new java.util.ArrayList<>();
-            for (java.util.Map<String, Object> post : page) {
-                if (author.equals(post.get("author_id"))) filtered.add(post);
-            }
-            page = filtered;
-        }
+        FeedRules.FeedCache.FeedPage page = session.feed_posts.page(limit, cursor_map, author);
         JSONArray posts = new JSONArray();
-        for (java.util.Map<String, Object> post : page) {
+        for (java.util.Map<String, Object> post : page.posts) {
             posts.put(new JSONObject().put("post_id", post.get("post_id"))
                 .put("author_id", post.get("author_id")).put("text", post.get("text"))
                 .put("created_ms", post.get("created_ms")).put("refs", new JSONArray()));
         }
         JSONObject reply_body = new JSONObject().put("posts", posts)
-            .put("complete", page.size() < limit);
-        if (!page.isEmpty()) {
-            java.util.Map<String, Object> last = page.get(page.size() - 1);
+            .put("complete", page.complete);
+        if (!page.posts.isEmpty()) {
+            java.util.Map<String, Object> last = page.posts.get(page.posts.size() - 1);
             reply_body.put("next_cursor", new JSONObject()
                 .put("last_author", last.get("author_id"))
                 .put("last_post", last.get("post_id")));
@@ -863,43 +855,56 @@ public class MainActivity extends Activity {
     private void pull_feed(Session session, PeerSnapshot peer) {
         int added = 0;
         int duplicates = 0;
-        try (Socket socket = new Socket()) {
-            session.sockets.add(socket);
-            try {
-                socket.connect(new InetSocketAddress(peer.ip, peer.tcp_port), 3000);
-                JSONObject cursor = null;
-                for (int page = 0; page < 20 && session.running; page++) {
-                    JSONObject body = new JSONObject().put("limit", FeedRules.PAGE_LIMIT);
-                    if (cursor != null) body.put("cursor", cursor);
-                    Frames.send(socket.getOutputStream(),
-                        message(session, "POST_QUERY", body).toString());
-                    JSONObject reply = receive(socket, 5000);
-                    if (reply == null || !"POST_PAGE".equals(reply.getString("type"))) {
-                        throw new IOException("Expected POST_PAGE");
+        JSONObject cursor = null;
+        try {
+            for (int page = 0; page < 20 && session.running; page++) {
+                JSONObject query = message(session, "POST_QUERY",
+                    new JSONObject().put("limit", FeedRules.PAGE_LIMIT));
+                if (cursor != null) query.getJSONObject("body").put("cursor", cursor);
+                JSONObject reply;
+                try (Socket socket = new Socket()) {
+                    session.sockets.add(socket);
+                    try {
+                        socket.connect(new InetSocketAddress(peer.ip, peer.tcp_port), 3000);
+                        Frames.send(socket.getOutputStream(), query.toString());
+                        reply = receive(socket, 5000);
+                    } finally {
+                        session.sockets.remove(socket);
                     }
-                    JSONObject reply_body = reply.getJSONObject("body");
-                    JSONArray posts = reply_body.getJSONArray("posts");
-                    java.util.List<java.util.Map<String, String>> maps = new java.util.ArrayList<>();
-                    for (int index = 0; index < posts.length(); index++) {
-                        JSONObject post = posts.getJSONObject(index);
-                        java.util.Map<String, String> fields = new java.util.HashMap<>();
-                        fields.put("post_id", post.optString("post_id", ""));
-                        fields.put("author_id", post.optString("author_id", ""));
-                        fields.put("text", post.optString("text", ""));
-                        fields.put("created_ms", Long.toString(post.optLong("created_ms", -1)));
-                        maps.add(fields);
-                    }
-                    int merged = session.feed_posts.mergeInto(maps);
-                    added += merged;
-                    duplicates += maps.size() - merged;
-                    if (reply_body.optBoolean("complete", true)) break;
-                    cursor = reply_body.optJSONObject("next_cursor");
-                    if (cursor == null) break;
                 }
-                report(session, getString(R.string.feed_synced, added, duplicates));
-            } finally {
-                session.sockets.remove(socket);
+                if (reply == null || !"POST_PAGE".equals(reply.getString("type"))
+                        || !query.getString("message_id").equals(reply.optString("reply_to", null))
+                        || !peer.peer_id.equals(reply.getString("peer_id"))
+                        || !peer.session_id.equals(reply.getString("session_id"))) {
+                    throw new IOException("Invalid post page response");
+                }
+                JSONObject reply_body = reply.getJSONObject("body");
+                JSONArray posts = reply_body.getJSONArray("posts");
+                java.util.List<java.util.Map<String, String>> maps = new java.util.ArrayList<>();
+                for (int index = 0; index < posts.length(); index++) {
+                    JSONObject post = posts.getJSONObject(index);
+                    long created = post.getLong("created_ms");
+                    if (created < 0) throw new IOException("Invalid post created_ms");
+                    java.util.Map<String, String> fields = new java.util.HashMap<>();
+                    fields.put("post_id", post.getString("post_id"));
+                    fields.put("author_id", post.getString("author_id"));
+                    fields.put("text", post.getString("text"));
+                    fields.put("created_ms", Long.toString(created));
+                    maps.add(fields);
+                }
+                int merged;
+                try {
+                    merged = session.feed_posts.mergeInto(maps);
+                } catch (IllegalArgumentException error) {
+                    throw new IOException("Invalid post page", error);
+                }
+                added += merged;
+                duplicates += maps.size() - merged;
+                if (reply_body.optBoolean("complete", true)) break;
+                cursor = reply_body.optJSONObject("next_cursor");
+                if (cursor == null) break;
             }
+            report(session, getString(R.string.feed_synced, added, duplicates));
         } catch (Exception error) {
             report(session, getString(R.string.feed_failed, error));
         }

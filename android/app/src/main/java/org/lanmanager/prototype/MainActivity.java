@@ -176,6 +176,7 @@ public class MainActivity extends Activity {
         final ChatRules.ChatDedupe chat_seen = new ChatRules.ChatDedupe();
         final List<ChatEntry> chat_history =
             Collections.synchronizedList(new ArrayList<>());
+        final FeedRules.FeedCache feed_posts = new FeedRules.FeedCache();
         WifiManager.MulticastLock wifi_lock;
         final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
         final ThreadPoolExecutor workers = new ThreadPoolExecutor(
@@ -425,7 +426,7 @@ public class MainActivity extends Activity {
             update_session_ui(session);
             JSONObject hello = new JSONObject().put("version", 1).put("peer_id", peer_id)
                 .put("session_id", session.id).put("name", name).put("tcp_port", ChatRules.CHAT_PORT)
-                .put("capabilities", new JSONArray().put("echo_v1").put("file_v1").put("chat_v1"));
+                .put("capabilities", new JSONArray().put("echo_v1").put("file_v1").put("chat_v1").put("posts_v1"));
             byte[] packet = ("LMAN\u0001" + hello).getBytes(StandardCharsets.UTF_8);
             if (packet.length > 1200) throw new IOException("HELLO too large");
             long next_announcement = 0;
@@ -720,6 +721,10 @@ public class MainActivity extends Activity {
                 receive_file(session, socket, request);
                 return;
             }
+            if ("POST_QUERY".equals(request.getString("type"))) {
+                serve_post_query(session, socket, request);
+                return;
+            }
             if ("CHAT".equals(request.getString("type"))) {
                 if (!ChatRules.acceptsChat(port)) throw new IOException("CHAT needs the chat port");
                 receive_chat(session, socket, request);
@@ -743,6 +748,49 @@ public class MainActivity extends Activity {
         } finally {
             session.sockets.remove(socket);
         }
+    }
+
+    private void serve_post_query(Session session, Socket socket, JSONObject request)
+            throws Exception {
+        JSONObject body = request.getJSONObject("body");
+        int limit = body.optInt("limit", FeedRules.PAGE_LIMIT);
+        if (limit < 1 || limit > FeedRules.PAGE_LIMIT) throw new IOException("Bad page limit");
+        String author = body.optString("author_id", null);
+        JSONObject cursor = body.optJSONObject("cursor");
+        java.util.Map<String, Object> cursor_map = null;
+        if (cursor != null) {
+            cursor_map = new java.util.HashMap<>();
+            cursor_map.put("last_author", cursor.optString("last_author", null));
+            cursor_map.put("last_post", cursor.optString("last_post", null));
+        }
+        java.util.List<java.util.Map<String, Object>> page =
+            session.feed_posts.ordered(limit, cursor_map);
+        if (author != null) {
+            java.util.List<java.util.Map<String, Object>> filtered = new java.util.ArrayList<>();
+            for (java.util.Map<String, Object> post : page) {
+                if (author.equals(post.get("author_id"))) filtered.add(post);
+            }
+            page = filtered;
+        }
+        JSONArray posts = new JSONArray();
+        for (java.util.Map<String, Object> post : page) {
+            posts.put(new JSONObject().put("post_id", post.get("post_id"))
+                .put("author_id", post.get("author_id")).put("text", post.get("text"))
+                .put("created_ms", post.get("created_ms")).put("refs", new JSONArray()));
+        }
+        JSONObject reply_body = new JSONObject().put("posts", posts)
+            .put("complete", page.size() < limit);
+        if (!page.isEmpty()) {
+            java.util.Map<String, Object> last = page.get(page.size() - 1);
+            reply_body.put("next_cursor", new JSONObject()
+                .put("last_author", last.get("author_id"))
+                .put("last_post", last.get("post_id")));
+        } else {
+            reply_body.put("next_cursor", JSONObject.NULL);
+        }
+        JSONObject reply = message(session, "POST_PAGE", reply_body);
+        reply.put("reply_to", request.getString("message_id"));
+        Frames.send(socket.getOutputStream(), reply.toString());
     }
 
     private void receive_chat(Session session, Socket socket, JSONObject request) throws Exception {

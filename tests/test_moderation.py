@@ -80,3 +80,51 @@ def test_forged_tombstone_key_rejected() -> None:
     with pytest.raises(ValueError):
         validate_tombstone(forged)
     assert TARGET != tombstone["tombstone"]["target"]
+
+
+def test_sync_hides_tombstoned_target(tmp_path):
+    from core.feed import serve_query
+    from core.storage import JsonLinesPostStore
+    store = JsonLinesPostStore(tmp_path / 'posts.jsonl')
+    target = _signed_target()
+    from core.post_signatures import sign_post as _sign
+    author = SigningIdentity(target['author_id'])
+    store.add(_sign(dict(target), author))
+    tombstone = {
+        'post_id': str(uuid4()),
+        'author_id': target['author_id'],
+        'text': 'tombstone',
+        'created_ms': 123457,
+        'refs': [],
+        'tombstone': {'target': target['post_id']},
+    }
+    tomb_id = store.add(_sign(tombstone, author)) and tombstone['post_id']
+    page = serve_query(store, {'limit': 50, 'cursor': None, 'author_id': None})
+    ids = [post['post_id'] for post in page['posts']]
+    assert target['post_id'] not in ids and tomb_id in ids
+
+
+def test_tombstone_before_target_still_hides(tmp_path):
+    from core.feed import merge_page, serve_query
+    from core.post_signatures import sign_post
+    from core.storage import JsonLinesPostStore
+    store = JsonLinesPostStore(tmp_path / 'posts.jsonl')
+    target = _signed_target()
+    author = SigningIdentity(target['author_id'])
+    tombstone = {
+        'post_id': str(uuid4()),
+        'author_id': target['author_id'],
+        'text': 'tombstone',
+        'created_ms': 123457,
+        'refs': [],
+        'tombstone': {'target': target['post_id']},
+    }
+    signed_tomb = sign_post(tombstone, author)
+    added, _ = merge_page(store, [signed_tomb])
+    assert added == 1
+    added, _ = merge_page(store, [target])
+    assert added == 1
+    page = serve_query(store, {'limit': 50, 'cursor': None, 'author_id': None})
+    ids = [post['post_id'] for post in page['posts']]
+    assert target['post_id'] not in ids
+    assert signed_tomb['post_id'] in ids

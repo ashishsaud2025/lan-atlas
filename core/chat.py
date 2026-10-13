@@ -31,6 +31,7 @@ from core.peer_repository import (
     PeerRepository, PeerRepositoryEvent, TrustState,
 )
 from core.post_signatures import sign_post
+from core.posts import validate_tombstone
 from core.protocol import (
     ProtocolError, envelope, recv_message, send_message, validate_envelope,
 )
@@ -249,6 +250,63 @@ class ChatService:
             raise RuntimeError("generated duplicate post ID")
         self._event("post_published", {"post_id": post["post_id"]})
         return post["post_id"]
+
+    def delete_post(self, post_id: str) -> str:
+        """Publish a signed tombstone hiding one own signed post."""
+        if self.post_store is None:
+            raise RuntimeError("post store is not configured")
+        if self.secure_transport is None:
+            raise RuntimeError("tombstones need the device identity")
+        target = self.post_store.get(post_id)
+        if target is None:
+            raise ValueError("unknown post")
+        if target.get("author_id") != self.hello.peer_id:
+            raise ValueError("only the author deletes a post")
+        if "security" not in target:
+            raise ValueError("unsigned posts cannot be deleted")
+        tombstone = {"post_id": str(uuid4()), "author_id": self.hello.peer_id,
+                     "text": "tombstone",
+                     "created_ms": time.time_ns() // 1_000_000,
+                     "refs": [], "tombstone": {"target": post_id}}
+        signed = sign_post(tombstone, self.secure_transport.identity)
+        validate_tombstone(signed)
+        if not self.post_store.add(signed):
+            raise RuntimeError("generated duplicate tombstone ID")
+        self._event("post_deleted", {"post_id": post_id, "tombstone_id": signed["post_id"]})
+        return signed["post_id"]
+
+    def edit_post(self, post_id: str, text: str) -> str:
+        """Publish a replacement post plus a tombstone linking old to new."""
+        if self.post_store is None:
+            raise RuntimeError("post store is not configured")
+        if self.secure_transport is None:
+            raise RuntimeError("edits need the device identity")
+        target = self.post_store.get(post_id)
+        if target is None:
+            raise ValueError("unknown post")
+        if target.get("author_id") != self.hello.peer_id:
+            raise ValueError("only the author edits a post")
+        if "security" not in target:
+            raise ValueError("unsigned posts cannot be edited")
+        replacement = {"post_id": str(uuid4()), "author_id": self.hello.peer_id,
+                       "text": text, "created_ms": time.time_ns() // 1_000_000,
+                       "refs": []}
+        signed_replacement = sign_post(replacement, self.secure_transport.identity)
+        tombstone = {"post_id": str(uuid4()), "author_id": self.hello.peer_id,
+                     "text": "tombstone",
+                     "created_ms": time.time_ns() // 1_000_000,
+                     "refs": [], "tombstone": {"target": post_id,
+                                               "replacement": signed_replacement}}
+        signed = sign_post(tombstone, self.secure_transport.identity)
+        validate_tombstone(signed)
+        if not self.post_store.add(signed_replacement):
+            raise RuntimeError("generated duplicate post ID")
+        if not self.post_store.add(signed):
+            raise RuntimeError("generated duplicate tombstone ID")
+        self._event("post_edited", {"post_id": post_id,
+                                    "replacement_id": signed_replacement["post_id"],
+                                    "tombstone_id": signed["post_id"]})
+        return signed_replacement["post_id"]
 
     def sync_posts(self, peer: Peer) -> str:
         """Queue a bounded page sync from one peer without blocking the UI."""

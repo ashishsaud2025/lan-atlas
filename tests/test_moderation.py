@@ -128,3 +128,45 @@ def test_tombstone_before_target_still_hides(tmp_path):
     ids = [post['post_id'] for post in page['posts']]
     assert target['post_id'] not in ids
     assert signed_tomb['post_id'] in ids
+
+
+def _secure_service(tmp_path, name='Local'):
+    import socket as _socket
+    from pathlib import Path as _Path
+    from core.chat import ChatService
+    from core.discovery import Hello
+    from core.identity import DeviceIdentity
+    from core.secure_transport import SecureTransport
+    from core.storage import JsonLinesPostStore
+    from core.trust import TrustStore
+    from uuid import uuid4 as _uuid4
+    peer_id = str(_uuid4())
+
+    def _free_port():
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
+            sock.bind(('127.0.0.1', 0))
+            return sock.getsockname()[1]
+
+    identity = DeviceIdentity.load_or_create(tmp_path / (name + '.pem'), peer_id)
+    hello = Hello(peer_id, str(_uuid4()), name, _free_port(),
+                  ('chat_v1', 'file_v1', 'posts_v1', 'secure_transport_v1'),
+                  _free_port(), identity.fingerprint)
+    transport = SecureTransport(identity, TrustStore(tmp_path / (name + '-trust.json')), hello)
+    store = JsonLinesPostStore(tmp_path / (name + '-posts.jsonl'))
+    service = ChatService(hello, discovery_port=_free_port(), post_store=store,
+                          secure_transport=transport)
+    return service
+
+
+def test_delete_and_edit_signed_post(tmp_path):
+    service = _secure_service(tmp_path)
+    post_id = service.publish_post('original')
+    tomb_id = service.delete_post(post_id)
+    assert tomb_id != post_id
+    with pytest.raises(ValueError):
+        service.delete_post('00000000-0000-4000-8000-000000000099')
+    post_id2 = service.publish_post('version one')
+    edit_id = service.edit_post(post_id2, 'version two')
+    assert edit_id != post_id2
+    with pytest.raises(ValueError):
+        service.edit_post(post_id2, '   ')

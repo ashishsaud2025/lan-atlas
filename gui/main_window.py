@@ -30,6 +30,7 @@ from core.peer_repository import (
     ReachabilityState, TrustState,
 )
 from core.post_signatures import verify_post
+from core.feed import tombstoned_ids
 from core.forwarding import ForwardingService
 from core.portal import PORTAL_PORT, PortalServer
 from core.protocol import envelope
@@ -881,6 +882,8 @@ class MainWindow(QMainWindow):
         self.feed_view.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(self.feed_view, 1)
+        self.feed_view.selectionModel().currentChanged.connect(
+            self._feed_selected)
         self.feed_empty = empty_state(
             "No posts yet. Publish below or sync a posts-capable peer above.",
             "Write a post", self._focus_post_input)
@@ -899,6 +902,14 @@ class MainWindow(QMainWindow):
         compose.addWidget(self.post_input, 1)
         compose.addWidget(self.publish_button)
         layout.addLayout(compose)
+        actions = QHBoxLayout()
+        self.feed_edit = action_button("Edit selected post", self._edit_selected_post)
+        self.feed_delete = action_button("Delete selected post", self._delete_selected_post)
+        for button in (self.feed_edit, self.feed_delete):
+            button.setEnabled(False)
+            actions.addWidget(button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
         note = QLabel(            "Publishing stores the post locally. Other peers receive it only when they synchronize.")
         note.setObjectName("PageSubtitle")
         note.setWordWrap(True)
@@ -3706,17 +3717,80 @@ class MainWindow(QMainWindow):
             self.feed_log.setPlainText("Post storage is not configured.")
             return
         posts, _, _ = self.service.post_store.page(50)
+        hidden = tombstoned_ids(self.service.post_store)
+        visible = [post for post in posts if post["post_id"] not in hidden]
         names = {record.hello.peer_id: record.hello.name
                  for record in self.service.peer_repository.snapshot()}
         names[self.service.hello.peer_id] = self.service.hello.name
         security_labels = {
-            post["post_id"]: self._post_security_label(post) for post in posts}
+            post["post_id"]: self._post_security_label(post) for post in visible}
+        edited = {post["tombstone"]["replacement"]["post_id"]
+                  for post in visible
+                  if isinstance(post.get("tombstone"), dict)
+                  and isinstance(post["tombstone"].get("replacement"), dict)
+                  and isinstance(post["tombstone"]["replacement"].get("post_id"), str)}
         self.post_model.set_posts(
-            posts, self.service.hello.peer_id, names, security_labels)
+            visible, self.service.hello.peer_id, names, security_labels, edited)
         lines = [f"{names.get(post['author_id'], post['author_id'])} | "
                  f"{security_labels[post['post_id']]} | {post['text']}"
-                 for post in posts]
+                 for post in visible if "tombstone" not in post]
         self.feed_log.setPlainText("\n\n".join(lines) if lines else "No cached posts.")
+        self._feed_selected()
+
+    def _selected_post(self) -> dict[str, Any] | None:
+        """Return the selected feed post, if the selection is still valid."""
+        indexes = self.feed_view.selectionModel().selectedIndexes()
+        if not indexes or not 0 <= indexes[0].row() < len(self.post_model.posts):
+            return None
+        return self.post_model.posts[indexes[0].row()]
+
+    def _own_signed_post(self, post: dict[str, Any] | None) -> bool:
+        """Gate author actions on this device holding the signing key."""
+        if post is None or post.get("author_id") != self.service.hello.peer_id:
+            return False
+        if "security" not in post:
+            return False
+        transport = self.service.secure_transport
+        if transport is None:
+            return False
+        verification = verify_post(post)
+        return (verification.state == "signed"
+                and verification.fingerprint == transport.identity.fingerprint)
+
+    @Slot()
+    def _feed_selected(self) -> None:
+        """Enable author actions only for own signed posts."""
+        allowed = self._own_signed_post(self._selected_post())
+        self.feed_edit.setEnabled(allowed)
+        self.feed_delete.setEnabled(allowed)
+
+    @Slot()
+    def _edit_selected_post(self) -> None:
+        """Publish a replacement plus tombstone for the selected own post."""
+        post = self._selected_post()
+        if post is None:
+            return
+        try:
+            self.service.edit_post(post["post_id"], self.post_input.text())
+        except (ValueError, RuntimeError) as error:
+            self.append(str(error), "Feed", "warning")
+            return
+        self.post_input.clear()
+        self.refresh_feed()
+
+    @Slot()
+    def _delete_selected_post(self) -> None:
+        """Publish a tombstone for the selected own post."""
+        post = self._selected_post()
+        if post is None:
+            return
+        try:
+            self.service.delete_post(post["post_id"])
+        except (ValueError, RuntimeError) as error:
+            self.append(str(error), "Feed", "warning")
+            return
+        self.refresh_feed()
+        self._feed_selected()
 
     def _post_security_label(self, post: dict[str, Any]) -> str:
         """Describe signature and pairing evidence without trusting embedded keys."""

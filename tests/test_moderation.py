@@ -170,3 +170,43 @@ def test_delete_and_edit_signed_post(tmp_path):
     assert edit_id != post_id2
     with pytest.raises(ValueError):
         service.edit_post(post_id2, '   ')
+
+
+import pytest as _pytest
+
+
+@_pytest.fixture
+def app() -> object:
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+@_pytest.fixture
+def window(app, tmp_path) -> object:
+    from PySide6.QtWidgets import QApplication
+    from gui.main_window import MainWindow
+    service = _secure_service(tmp_path, name='Local')
+    result = MainWindow(service)
+    result.show()
+    QApplication.processEvents()
+    yield result
+    result.close()
+    QApplication.processEvents()
+
+
+def test_feed_actions_gate_on_signed_authorship(app, window) -> None:
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from core.post_signatures import sign_post
+    service = window.service
+    assert not window.feed_delete.isEnabled()
+    post_id = service.publish_post('signed hello')
+    window.refresh_feed()
+    from PySide6.QtCore import QModelIndex
+    window.feed_view.setCurrentIndex(window.post_model.index(0, 0))
+    post = next(p for p in window.post_model.posts if p['post_id'] == post_id)
+    assert 'security' in post
+    assert window.feed_delete.isEnabled()
+    assert window.feed_edit.isEnabled()

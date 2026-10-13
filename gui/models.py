@@ -452,6 +452,7 @@ class PostListModel(QAbstractListModel):
         self.local_peer_id = ""
         self.author_names: dict[str, str] = {}
         self.security_labels: dict[str, str] = {}
+        self.edited_ids: set[str] = set()
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self.posts)
@@ -472,7 +473,11 @@ class PostListModel(QAbstractListModel):
                 stamp = "time unavailable"
             refs = f"\n{len(post['refs'])} attachment reference(s)" if post["refs"] else ""
             security = self.security_labels.get(post["post_id"], "Unsigned")
-            return (f"{author} · {provenance}\n{post['text']}\n"
+            if "tombstone" in post:
+                return (f"{author} · {provenance}\nPost deleted by author · {security}\n"
+                        f"Reported {stamp}; peer clocks may differ")
+            edited = " · edited" if post["post_id"] in self.edited_ids else ""
+            return (f"{author} · {provenance}{edited}\n{post['text']}\n"
                     f"Reported {stamp}; peer clocks may differ · {security}{refs}")
         if role == Qt.ItemDataRole.AccessibleTextRole:
             return f"Post by {post['author_id']}, {post['text']}"
@@ -480,13 +485,15 @@ class PostListModel(QAbstractListModel):
 
     def set_posts(self, posts: list[dict[str, Any]], local_peer_id: str,
                   author_names: dict[str, str],
-                  security_labels: dict[str, str] | None = None) -> None:
+                  security_labels: dict[str, str] | None = None,
+                  edited_ids: set[str] | None = None) -> None:
         """Replace the visible bounded page and its current author labels."""
         self.beginResetModel()
         self.posts = posts
         self.local_peer_id = local_peer_id
         self.author_names = dict(author_names)
         self.security_labels = dict(security_labels or {})
+        self.edited_ids = set(edited_ids or set())
         self.endResetModel()
 
     def set_author_names(self, author_names: dict[str, str]) -> None:

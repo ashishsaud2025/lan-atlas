@@ -30,7 +30,7 @@ from core.services import LocalServiceDirectory, RemoteDirectoryCache
 from core.peer_repository import (
     PeerRepository, PeerRepositoryEvent, TrustState,
 )
-from core.post_signatures import sign_post
+from core.post_signatures import sign_post, verify_post
 from core.posts import validate_tombstone
 from core.protocol import (
     ProtocolError, envelope, recv_message, send_message, validate_envelope,
@@ -264,6 +264,10 @@ class ChatService:
             raise ValueError("only the author deletes a post")
         if "security" not in target:
             raise ValueError("unsigned posts cannot be deleted")
+        verification = verify_post(target)
+        if (verification.state != "signed" or verification.fingerprint
+                != self.secure_transport.identity.fingerprint):
+            raise ValueError("only posts signed by this device can be deleted")
         tombstone = {"post_id": str(uuid4()), "author_id": self.hello.peer_id,
                      "text": "tombstone",
                      "created_ms": time.time_ns() // 1_000_000,
@@ -288,6 +292,10 @@ class ChatService:
             raise ValueError("only the author edits a post")
         if "security" not in target:
             raise ValueError("unsigned posts cannot be edited")
+        verification = verify_post(target)
+        if (verification.state != "signed" or verification.fingerprint
+                != self.secure_transport.identity.fingerprint):
+            raise ValueError("only posts signed by this device can be edited")
         replacement = {"post_id": str(uuid4()), "author_id": self.hello.peer_id,
                        "text": text, "created_ms": time.time_ns() // 1_000_000,
                        "refs": []}
@@ -299,10 +307,10 @@ class ChatService:
                                                "replacement": signed_replacement}}
         signed = sign_post(tombstone, self.secure_transport.identity)
         validate_tombstone(signed)
-        if not self.post_store.add(signed_replacement):
-            raise RuntimeError("generated duplicate post ID")
         if not self.post_store.add(signed):
             raise RuntimeError("generated duplicate tombstone ID")
+        if not self.post_store.add(signed_replacement):
+            raise RuntimeError("generated duplicate post ID")
         self._event("post_edited", {"post_id": post_id,
                                     "replacement_id": signed_replacement["post_id"],
                                     "tombstone_id": signed["post_id"]})

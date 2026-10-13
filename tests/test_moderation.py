@@ -210,3 +210,73 @@ def test_feed_actions_gate_on_signed_authorship(app, window) -> None:
     assert 'security' in post
     assert window.feed_delete.isEnabled()
     assert window.feed_edit.isEnabled()
+
+
+def test_attacker_tombstone_never_hides_foreign_post(tmp_path):
+    from core.feed import serve_query
+    from core.storage import JsonLinesPostStore
+    store = JsonLinesPostStore(tmp_path / 'posts.jsonl')
+    victim = _signed_target()
+    store.add(victim)
+    attacker_id = str(uuid4())
+    attacker = SigningIdentity(attacker_id)
+    forged = {
+        'post_id': str(uuid4()),
+        'author_id': attacker_id,
+        'text': 'tombstone',
+        'created_ms': 123457,
+        'refs': [],
+        'tombstone': {'target': victim['post_id']},
+    }
+    from core.posts import validate_tombstone
+    from core.post_signatures import sign_post
+    store.add(sign_post(forged, attacker))
+    assert validate_tombstone(store.get(forged['post_id'])) is not None
+    page = serve_query(store, {'limit': 50, 'cursor': None, 'author_id': None})
+    assert victim['post_id'] in [post['post_id'] for post in page['posts']]
+
+
+def test_junk_replacement_rejected(tmp_path):
+    from core.post_signatures import sign_post as _sign2
+    from core.post_signatures import verify_post as _verify
+    tombstone = _signed_tombstone()
+    identity = SigningIdentity(tombstone["author_id"])
+    replacement = _sign2({"post_id": str(uuid4()), "author_id": tombstone["author_id"],
+                          "text": "edited", "created_ms": 2, "refs": []}, identity)
+    assert _verify(replacement).state == "signed"
+    tampered = dict(replacement)
+    tampered["text"] = "forged edit"
+    assert _verify(tampered).state == "invalid"
+
+
+def test_forged_tombstone_grants_no_edited_label(app, window) -> None:
+    service = window.service
+    post_id = service.publish_post('mine')
+    window.refresh_feed()
+    assert window.post_model.edited_ids == set()
+    attacker_tomb = {
+        'post_id': '00000000-0000-4000-8000-000000000011',
+        'author_id': '00000000-0000-4000-8000-000000000012',
+        'text': 'tombstone',
+        'created_ms': 7,
+        'refs': [],
+        'tombstone': {'target': post_id},
+    }
+    service.post_store.add(attacker_tomb)
+    window.refresh_feed()
+    assert window.post_model.edited_ids == set()
+
+
+def test_tombstone_selection_disables_author_actions(app, window) -> None:
+    from PySide6.QtWidgets import QApplication
+    service = window.service
+    post_id = service.publish_post('mine')
+    tomb_id = service.delete_post(post_id)
+    window.refresh_feed()
+    rows = [index for index, post in enumerate(window.post_model.posts)
+            if post['post_id'] == tomb_id]
+    assert rows
+    window.feed_view.setCurrentIndex(window.post_model.index(rows[0], 0))
+    QApplication.processEvents()
+    assert not window.feed_delete.isEnabled()
+    assert not window.feed_edit.isEnabled()

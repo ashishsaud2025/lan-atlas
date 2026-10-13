@@ -28,6 +28,10 @@ def tombstoned_ids(store: PostStore) -> set[str]:
                 continue
             target = tombstone["tombstone"]["target"]
             assert isinstance(target, str)
+            original = store.get(target)
+            if (not isinstance(original, dict)
+                    or original.get("author_id") != tombstone["author_id"]):
+                continue
             hidden.add(target)
         if complete:
             return hidden

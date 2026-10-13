@@ -30,6 +30,7 @@ from core.peer_repository import (
     ReachabilityState, TrustState,
 )
 from core.post_signatures import verify_post
+from core.posts import validate_tombstone
 from core.feed import tombstoned_ids
 from core.forwarding import ForwardingService
 from core.portal import PORTAL_PORT, PortalServer
@@ -3724,11 +3725,19 @@ class MainWindow(QMainWindow):
         names[self.service.hello.peer_id] = self.service.hello.name
         security_labels = {
             post["post_id"]: self._post_security_label(post) for post in visible}
-        edited = {post["tombstone"]["replacement"]["post_id"]
-                  for post in visible
-                  if isinstance(post.get("tombstone"), dict)
-                  and isinstance(post["tombstone"].get("replacement"), dict)
-                  and isinstance(post["tombstone"]["replacement"].get("post_id"), str)}
+        edited = set()
+        for post in visible:
+            tombstone = post.get("tombstone")
+            if not isinstance(tombstone, dict):
+                continue
+            try:
+                validate_tombstone(post)
+            except ValueError:
+                continue
+            replacement = tombstone.get("replacement")
+            if (isinstance(replacement, dict)
+                    and isinstance(replacement.get("post_id"), str)):
+                edited.add(replacement["post_id"])
         self.post_model.set_posts(
             visible, self.service.hello.peer_id, names, security_labels, edited)
         lines = [f"{names.get(post['author_id'], post['author_id'])} | "
@@ -3748,7 +3757,7 @@ class MainWindow(QMainWindow):
         """Gate author actions on this device holding the signing key."""
         if post is None or post.get("author_id") != self.service.hello.peer_id:
             return False
-        if "security" not in post:
+        if "security" not in post or "tombstone" in post:
             return False
         transport = self.service.secure_transport
         if transport is None:

@@ -90,11 +90,12 @@ def validate_post(post: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(post, dict):
         raise ValueError("post must be an object")
     required = {"post_id", "author_id", "text", "created_ms"}
-    allowed = required | {"refs", "security"}
+    allowed = required | {"refs", "security", "tombstone"}
     if not required.issubset(post):
         raise ValueError("post has invalid fields")
-    if "security" in post and not set(post).issubset(allowed):
-        raise ValueError("post has invalid fields")
+    if "security" in post or "tombstone" in post:
+        if not set(post).issubset(allowed):
+            raise ValueError("post has invalid fields")
     _check_uuid(post.get("post_id"), "post_id")
     _check_uuid(post.get("author_id"), "author_id")
     text = post.get("text")
@@ -110,7 +111,43 @@ def validate_post(post: dict[str, Any]) -> dict[str, Any]:
         validate_ref(ref)
     if "security" in post:
         _validate_security(post["security"])
+    if "tombstone" in post:
+        _validate_tombstone_fields(post["tombstone"], post["post_id"], post["author_id"])
     return post
+
+
+def _validate_tombstone_fields(value: object, post_id: object, author_id: object) -> dict[str, Any]:
+    """Validate a tombstone mapping without checking its signature."""
+    if not isinstance(value, dict):
+        raise ValueError("tombstone must be an object")
+    if set(value) - {"target", "replacement"}:
+        raise ValueError("tombstone has invalid fields")
+    _check_uuid(value.get("target"), "tombstone target")
+    if value["target"] == post_id:
+        raise ValueError("tombstone cannot target its own post")
+    replacement = value.get("replacement")
+    if replacement is not None:
+        if not isinstance(replacement, dict) or "tombstone" in replacement:
+            raise ValueError("tombstone replacement must be a plain post")
+        validate_post(replacement)
+        if replacement.get("author_id") != author_id:
+            raise ValueError("tombstone replacement must share the author")
+    return value
+
+
+def validate_tombstone(post: dict[str, Any]) -> dict[str, Any]:
+    """Validate a signed tombstone, including its author proof."""
+    validated = validate_post(post)
+    if "tombstone" not in validated:
+        raise ValueError("post is not a tombstone")
+    if "security" not in validated:
+        raise ValueError("tombstone must be signed")
+    from core.post_signatures import verify_post
+
+    verification = verify_post(validated)
+    if verification.state != "signed":
+        raise ValueError(f"invalid tombstone signature: {verification.reason}")
+    return validated
 
 
 def sort_key(post: dict[str, Any]) -> tuple[str, str]:

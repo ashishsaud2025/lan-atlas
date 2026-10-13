@@ -47,6 +47,8 @@ def _signing_payload(post: dict[str, Any]) -> bytes:
         "created_ms": post["created_ms"],
         "refs": post.get("refs", []),
     }
+    if "tombstone" in post:
+        fields["tombstone"] = post["tombstone"]
     try:
         encoded = json.dumps(
             fields,

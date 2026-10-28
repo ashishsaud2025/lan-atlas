@@ -779,12 +779,11 @@ public class MainActivity extends Activity {
             cursor_map.put("last_author", cursor.optString("last_author", null));
             cursor_map.put("last_post", cursor.optString("last_post", null));
         }
-        FeedRules.FeedCache.FeedPage page = session.feed_posts.page(limit, cursor_map, author);
+        FeedRules.FeedCache.FeedPage page = session.feed_posts.servePage(
+            limit, cursor_map, author);
         JSONArray posts = new JSONArray();
         for (java.util.Map<String, Object> post : page.posts) {
-            posts.put(new JSONObject().put("post_id", post.get("post_id"))
-                .put("author_id", post.get("author_id")).put("text", post.get("text"))
-                .put("created_ms", post.get("created_ms")).put("refs", new JSONArray()));
+            posts.put(json_from(post));
         }
         JSONObject reply_body = new JSONObject().put("posts", posts)
             .put("complete", page.complete);
@@ -799,6 +798,46 @@ public class MainActivity extends Activity {
         JSONObject reply = message(session, "POST_PAGE", reply_body);
         reply.put("reply_to", request.getString("message_id"));
         Frames.send(socket.getOutputStream(), reply.toString());
+    }
+
+    private static java.util.Map<String, Object> plain_object(JSONObject object)
+            throws JSONException {
+        java.util.Map<String, Object> map = new java.util.HashMap<>();
+        java.util.Iterator<String> keys = object.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            map.put(key, plain_value(object.get(key)));
+        }
+        return map;
+    }
+
+    private static Object plain_value(Object value) throws JSONException {
+        if (value instanceof JSONObject) return plain_object((JSONObject) value);
+        if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            java.util.List<Object> list = new java.util.ArrayList<>();
+            for (int index = 0; index < array.length(); index++) {
+                list.add(plain_value(array.get(index)));
+            }
+            return list;
+        }
+        return value == JSONObject.NULL ? null : value;
+    }
+
+    private static Object json_from(Object value) throws JSONException {
+        if (value instanceof java.util.Map) {
+            JSONObject object = new JSONObject();
+            for (java.util.Map.Entry<?, ?> entry : ((java.util.Map<?, ?>) value).entrySet()) {
+                object.put((String) entry.getKey(), json_from(entry.getValue()));
+            }
+            return object;
+        }
+        if (value instanceof java.util.List) {
+            JSONArray array = new JSONArray();
+            for (Object item : (java.util.List<?>) value) array.put(json_from(item));
+            return array;
+        }
+        return value;
     }
 
     private void receive_chat(Session session, Socket socket, JSONObject request) throws Exception {
@@ -880,17 +919,9 @@ public class MainActivity extends Activity {
                 }
                 JSONObject reply_body = reply.getJSONObject("body");
                 JSONArray posts = reply_body.getJSONArray("posts");
-                java.util.List<java.util.Map<String, String>> maps = new java.util.ArrayList<>();
+                java.util.List<java.util.Map<String, Object>> maps = new java.util.ArrayList<>();
                 for (int index = 0; index < posts.length(); index++) {
-                    JSONObject post = posts.getJSONObject(index);
-                    long created = post.getLong("created_ms");
-                    if (created < 0) throw new IOException("Invalid post created_ms");
-                    java.util.Map<String, String> fields = new java.util.HashMap<>();
-                    fields.put("post_id", post.getString("post_id"));
-                    fields.put("author_id", post.getString("author_id"));
-                    fields.put("text", post.getString("text"));
-                    fields.put("created_ms", Long.toString(created));
-                    maps.add(fields);
+                    maps.add(plain_object(posts.getJSONObject(index)));
                 }
                 int merged;
                 try {
@@ -928,12 +959,24 @@ public class MainActivity extends Activity {
             feed_sync.setEnabled(live);
             StringBuilder posts = new StringBuilder();
             if (active != null) {
+                java.util.Set<String> edited = active.feed_posts.editedIds();
                 for (java.util.Map<String, Object> post
-                        : active.feed_posts.ordered(FeedRules.CACHE_BOUND, null)) {
+                        : active.feed_posts.displayPage(FeedRules.CACHE_BOUND)) {
                     String author = (String) post.get("author_id");
                     String label = peer_id.equals(author) ? "phone post" : author;
                     if (peer != null && peer.peer_id.equals(author)) label = peer.name;
-                    posts.append(label).append(" | ").append(post.get("text")).append('\n');
+                    posts.append(label).append(" | ");
+                    if (post.containsKey("tombstone")) {
+                        posts.append(getString(active.feed_posts.stateOf(
+                                (String) post.get("post_id")) == PostSignatures.State.SIGNED
+                            ? R.string.feed_deleted : R.string.feed_unverified_deletion));
+                    } else {
+                        posts.append(post.get("text"));
+                        if (edited.contains(post.get("post_id"))) {
+                            posts.append(getString(R.string.feed_edited_marker));
+                        }
+                    }
+                    posts.append('\n');
                 }
             }
             feed_list.setText(posts.length() == 0

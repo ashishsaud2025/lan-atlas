@@ -2,13 +2,22 @@ package org.lanmanager.prototype;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
 import org.junit.Test;
 
 public final class FeedRulesTest {
     private static final String ID = "00000000-0000-4000-8000-000000000001";
     private static final String AUTHOR = "00000000-0000-4000-8000-000000000002";
+    private final Properties fixture = PostFixtures.load();
 
     @Test public void text_enforces_bounds() {
         assertTrue(FeedRules.validText("hi"));
@@ -33,30 +42,30 @@ public final class FeedRulesTest {
     @Test public void invalid_page_rejected_whole() {
         FeedRules.FeedCache cache = new FeedRules.FeedCache();
         assertEquals(1, cache.putValidated(ID, AUTHOR, "hi", 1));
-        java.util.Map<String, String> bad = new java.util.HashMap<>();
+        Map<String, Object> bad = new HashMap<>();
         bad.put("post_id", "00000000-0000-4000-8000-000000000009");
-        java.util.Map<String, String> good = new java.util.HashMap<>();
+        Map<String, Object> good = new HashMap<>();
         good.put("post_id", ID);
         good.put("author_id", AUTHOR);
         good.put("text", "hi");
-        good.put("created_ms", "2");
+        good.put("created_ms", 2L);
         try {
-            cache.mergeInto(java.util.Arrays.asList(bad, good));
+            cache.mergeInto(Arrays.asList(bad, good));
             assertFalse("invalid page must throw", true);
         } catch (IllegalArgumentException expected) {
         }
-        assertEquals(1, cache.ordered(50, null).size());
+        assertEquals(1, cache.servePage(50, null, null).posts.size());
     }
 
     @Test public void staged_duplicates_count_once() {
         FeedRules.FeedCache cache = new FeedRules.FeedCache();
-        java.util.Map<String, String> post = new java.util.HashMap<>();
+        Map<String, Object> post = new HashMap<>();
         post.put("post_id", ID);
         post.put("author_id", AUTHOR);
         post.put("text", "hi");
-        post.put("created_ms", "1");
-        assertEquals(1, cache.mergeInto(java.util.Arrays.asList(post, post)));
-        assertEquals(1, cache.ordered(50, null).size());
+        post.put("created_ms", 1L);
+        assertEquals(1, cache.mergeInto(Arrays.asList(post, post)));
+        assertEquals(1, cache.servePage(50, null, null).posts.size());
     }
 
     @Test public void author_page_filters_before_limit() {
@@ -68,18 +77,16 @@ public final class FeedRulesTest {
         }
         String mine = "00000000-0000-4000-8000-000000000009";
         assertEquals(1, cache.putValidated(mine, AUTHOR, "mine", 9));
-        FeedRules.FeedCache.FeedPage page = cache.page(2, null, AUTHOR);
+        FeedRules.FeedCache.FeedPage page = cache.servePage(2, null, AUTHOR);
         assertEquals(1, page.posts.size());
         assertTrue(page.complete);
     }
 
     @Test public void duplicate_ids_merge_once() {
         FeedRules.FeedCache cache = new FeedRules.FeedCache();
-        String id = "00000000-0000-4000-8000-000000000001";
-        String author = "00000000-0000-4000-8000-000000000002";
-        assertEquals(1, cache.putValidated(id, author, "hi", 1));
-        assertEquals(0, cache.putValidated(id, author, "hi", 1));
-        assertEquals(1, cache.ordered(50, null).size());
+        assertEquals(1, cache.putValidated(ID, AUTHOR, "hi", 1));
+        assertEquals(0, cache.putValidated(ID, AUTHOR, "hi", 1));
+        assertEquals(1, cache.servePage(50, null, null).posts.size());
     }
 
     @Test public void paging_honors_limit_and_cursor() {
@@ -88,10 +95,146 @@ public final class FeedRulesTest {
             String id = String.format("00000000-0000-4000-8000-%012d", index);
             assertEquals(1, cache.putValidated(id, AUTHOR, "post", index));
         }
-        assertEquals(2, cache.ordered(2, null).size());
-        java.util.Map<String, Object> cursor = new java.util.HashMap<>();
+        assertEquals(2, cache.servePage(2, null, null).posts.size());
+        Map<String, Object> cursor = new HashMap<>();
         cursor.put("last_author", AUTHOR);
         cursor.put("last_post", "00000000-0000-4000-8000-000000000001");
-        assertEquals(3, cache.ordered(50, cursor).size());
+        assertEquals(3, cache.servePage(50, cursor, null).posts.size());
+    }
+
+    @Test public void signed_post_page_keeps_signature_and_refs() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        Map<String, Object> target = PostFixtures.signed(fixture, "target");
+        assertEquals(1, cache.mergeInto(Arrays.asList(target)));
+        Map<String, Object> served = cache.servePage(50, null, null).posts.get(0);
+        Map<?, ?> security = (Map<?, ?>) served.get("security");
+        assertEquals(fixture.getProperty("target.certificate"), security.get("certificate"));
+        assertEquals(1, ((List<?>) served.get("refs")).size());
+    }
+
+    @Test public void verified_tombstone_hides_target_from_serving() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        Map<String, Object> target = PostFixtures.signed(fixture, "target");
+        Map<String, Object> tombstone = PostFixtures.signed(fixture, "delete");
+        assertEquals(2, cache.mergeInto(Arrays.asList(target, tombstone)));
+        assertTrue(cache.hiddenIds().contains(fixture.getProperty("target.post_id")));
+        assertEquals(PostSignatures.State.SIGNED,
+            cache.stateOf(fixture.getProperty("delete.post_id")));
+        List<String> served = ids(cache.servePage(50, null, null));
+        assertFalse(served.contains(fixture.getProperty("target.post_id")));
+        assertTrue(served.contains(fixture.getProperty("delete.post_id")));
+    }
+
+    @Test public void tombstone_before_target_still_hides() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        cache.mergeInto(Arrays.asList(PostFixtures.signed(fixture, "delete")));
+        cache.mergeInto(Arrays.asList(PostFixtures.signed(fixture, "target")));
+        assertFalse(ids(cache.servePage(50, null, null))
+            .contains(fixture.getProperty("target.post_id")));
+    }
+
+    @Test public void attacker_tombstone_cannot_hide_foreign_post() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        cache.mergeInto(Arrays.asList(
+            PostFixtures.signed(fixture, "target"),
+            PostFixtures.signed(fixture, "attacker_tombstone")));
+        assertTrue(cache.hiddenIds().isEmpty());
+        assertTrue(ids(cache.servePage(50, null, null))
+            .contains(fixture.getProperty("target.post_id")));
+    }
+
+    @Test public void unsigned_tombstone_cannot_hide_anything() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        Map<String, Object> tombstone = PostFixtures.unsigned(fixture, "unsigned");
+        tombstone.put("post_id", "00000000-0000-4000-8000-000000000108");
+        Map<String, Object> mapping = new HashMap<>();
+        mapping.put("target", fixture.getProperty("target.post_id"));
+        tombstone.put("tombstone", mapping);
+        cache.mergeInto(Arrays.asList(PostFixtures.signed(fixture, "target"), tombstone));
+        assertTrue(cache.hiddenIds().isEmpty());
+        assertEquals(PostSignatures.State.UNSIGNED, cache.stateOf(
+            "00000000-0000-4000-8000-000000000108"));
+    }
+
+    @Test public void invalid_signed_post_rejects_whole_page() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        cache.mergeInto(Arrays.asList(PostFixtures.signed(fixture, "target")));
+        Map<String, Object> tampered = PostFixtures.signed(fixture, "target");
+        tampered.put("post_id", "00000000-0000-4000-8000-000000000109");
+        tampered.put("text", "forged after signing");
+        try {
+            cache.mergeInto(Arrays.asList(
+                PostFixtures.unsigned(fixture, "unsigned"), tampered));
+            assertFalse("invalid page must throw", true);
+        } catch (IllegalArgumentException expected) {
+        }
+        assertEquals(1, cache.servePage(50, null, null).posts.size());
+        assertFalse(cache.servePage(50, null, null).posts.get(0).get("post_id")
+            .equals(fixture.getProperty("unsigned.post_id")));
+    }
+
+    @Test public void edit_tombstone_marks_and_reveals_replacement() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        cache.mergeInto(Arrays.asList(
+            PostFixtures.signed(fixture, "edit_target"),
+            PostFixtures.signed(fixture, "edit_tombstone"),
+            PostFixtures.signed(fixture, "replacement")));
+        assertTrue(cache.hiddenIds().contains(fixture.getProperty("edit_target.post_id")));
+        assertTrue(cache.editedIds().contains(fixture.getProperty("replacement.post_id")));
+        List<String> display = new ArrayList<>();
+        for (Map<String, Object> post : cache.displayPage(50)) {
+            display.add((String) post.get("post_id"));
+        }
+        assertFalse(display.contains(fixture.getProperty("edit_target.post_id")));
+        assertTrue(display.contains(fixture.getProperty("replacement.post_id")));
+        assertTrue(display.contains(fixture.getProperty("edit_tombstone.post_id")));
+    }
+
+    @Test public void serving_pages_skip_hidden_targets_without_stalling() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        cache.mergeInto(Arrays.asList(
+            PostFixtures.signed(fixture, "target"),
+            PostFixtures.signed(fixture, "delete"),
+            PostFixtures.unsigned(fixture, "unsigned")));
+        FeedRules.FeedCache.FeedPage first = cache.servePage(1, null, null);
+        assertEquals(1, first.posts.size());
+        assertFalse(first.complete);
+        assertEquals(fixture.getProperty("delete.post_id"),
+            first.posts.get(0).get("post_id"));
+        Map<String, Object> cursor = new HashMap<>();
+        cursor.put("last_author", first.posts.get(0).get("author_id"));
+        cursor.put("last_post", first.posts.get(0).get("post_id"));
+        FeedRules.FeedCache.FeedPage second = cache.servePage(1, cursor, null);
+        assertEquals(1, second.posts.size());
+        assertTrue(second.complete);
+        assertEquals(fixture.getProperty("unsigned.post_id"),
+            second.posts.get(0).get("post_id"));
+        assertNull(second.posts.get(0).get("security"));
+        assertNotNull(second.posts.get(0).get("text"));
+    }
+
+    @Test public void serving_caps_pages_below_the_frame_budget() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        for (int index = 0; index < 25; index++) {
+            String id = String.format("00000000-0000-4000-8000-%012d", index);
+            assertEquals(1, cache.putValidated(id, AUTHOR, "post", index));
+        }
+        FeedRules.FeedCache.FeedPage first = cache.servePage(50, null, null);
+        assertEquals(16, first.posts.size());
+        assertFalse(first.complete);
+        Map<String, Object> cursor = new HashMap<>();
+        cursor.put("last_author", AUTHOR);
+        cursor.put("last_post", first.posts.get(first.posts.size() - 1).get("post_id"));
+        FeedRules.FeedCache.FeedPage second = cache.servePage(50, cursor, null);
+        assertEquals(9, second.posts.size());
+        assertTrue(second.complete);
+    }
+
+    private static List<String> ids(FeedRules.FeedCache.FeedPage page) {
+        List<String> out = new ArrayList<>();
+        for (Map<String, Object> post : page.posts) {
+            out.add((String) post.get("post_id"));
+        }
+        return out;
     }
 }

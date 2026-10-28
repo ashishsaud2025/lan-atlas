@@ -230,6 +230,61 @@ public final class FeedRulesTest {
         assertTrue(second.complete);
     }
 
+    @Test public void text_rejects_unpaired_surrogates() {
+        assertFalse(FeedRules.validText("bad \ud800 text"));
+        assertTrue(FeedRules.validText("emoji \ud83d\ude00"));
+    }
+
+    @Test public void serving_honors_byte_budget() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        for (int index = 0; index < 5; index++) {
+            String id = String.format("00000000-0000-4000-8000-%012d", index);
+            assertEquals(1, cache.putValidated(id, AUTHOR, "post", index));
+        }
+        Map<String, Object> first = cache.servePage(50, null, null).posts.get(0);
+        long single = FeedRules.estimateBytes(first);
+        FeedRules.FeedCache.FeedPage page = cache.servePage(50, null, null, single * 2);
+        assertEquals(2, page.posts.size());
+        assertFalse(page.complete);
+        Map<String, Object> cursor = new HashMap<>();
+        cursor.put("last_author", page.posts.get(1).get("author_id"));
+        cursor.put("last_post", page.posts.get(1).get("post_id"));
+        FeedRules.FeedCache.FeedPage next = cache.servePage(50, cursor, null);
+        assertEquals(3, next.posts.size());
+        assertTrue(next.complete);
+    }
+
+    @Test public void local_posts_trim_to_the_cache_bound() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        for (int index = 0; index < FeedRules.CACHE_BOUND + 5; index++) {
+            String id = String.format("00000000-0000-4000-8000-%012d", index);
+            assertEquals(1, cache.putValidated(id, AUTHOR, "post", index));
+        }
+        assertEquals(FeedRules.CACHE_BOUND, cache.size());
+    }
+
+    @Test public void merged_posts_are_stored_as_copies() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        Map<String, Object> target = PostFixtures.signed(fixture, "target");
+        assertEquals(1, cache.mergeInto(Arrays.asList(target)));
+        target.put("text", "mutated after merge");
+        assertFalse("mutated after merge".equals(
+            cache.servePage(50, null, null).posts.get(0).get("text")));
+    }
+
+    @Test public void display_snapshot_reports_evidence_consistently() {
+        FeedRules.FeedCache cache = new FeedRules.FeedCache();
+        cache.mergeInto(Arrays.asList(
+            PostFixtures.signed(fixture, "edit_target"),
+            PostFixtures.signed(fixture, "edit_tombstone"),
+            PostFixtures.signed(fixture, "replacement")));
+        FeedRules.FeedCache.DisplaySnapshot snapshot = cache.displaySnapshot(50);
+        assertTrue(snapshot.edited.contains(fixture.getProperty("replacement.post_id")));
+        assertEquals(PostSignatures.State.SIGNED, snapshot.states.get(
+            fixture.getProperty("edit_tombstone.post_id")));
+        assertFalse(snapshot.states.containsKey(fixture.getProperty("edit_target.post_id")));
+    }
+
     private static List<String> ids(FeedRules.FeedCache.FeedPage page) {
         List<String> out = new ArrayList<>();
         for (Map<String, Object> post : page.posts) {

@@ -771,13 +771,28 @@ public class MainActivity extends Activity {
         JSONObject body = request.getJSONObject("body");
         int limit = body.optInt("limit", FeedRules.PAGE_LIMIT);
         if (limit < 1 || limit > FeedRules.PAGE_LIMIT) throw new IOException("Bad page limit");
-        String author = body.optString("author_id", null);
+        String author = body.isNull("author_id") ? null : body.optString("author_id", null);
+        if (author != null && !FeedRules.validUuid(author)) {
+            throw new IOException("Bad author filter");
+        }
         JSONObject cursor = body.optJSONObject("cursor");
         java.util.Map<String, Object> cursor_map = null;
         if (cursor != null) {
-            cursor_map = new java.util.HashMap<>();
-            cursor_map.put("last_author", cursor.optString("last_author", null));
-            cursor_map.put("last_post", cursor.optString("last_post", null));
+            String last_author = cursor.isNull("last_author")
+                ? null : cursor.optString("last_author", null);
+            String last_post = cursor.isNull("last_post")
+                ? null : cursor.optString("last_post", null);
+            boolean paired = last_author != null && last_post != null;
+            if (paired ? (!FeedRules.validUuid(last_author)
+                    || !FeedRules.validUuid(last_post))
+                    : (last_author != null || last_post != null)) {
+                throw new IOException("Bad page cursor");
+            }
+            if (paired) {
+                cursor_map = new java.util.HashMap<>();
+                cursor_map.put("last_author", last_author);
+                cursor_map.put("last_post", last_post);
+            }
         }
         FeedRules.FeedCache.FeedPage page = session.feed_posts.servePage(
             limit, cursor_map, author);
@@ -828,7 +843,10 @@ public class MainActivity extends Activity {
         if (value instanceof java.util.Map) {
             JSONObject object = new JSONObject();
             for (java.util.Map.Entry<?, ?> entry : ((java.util.Map<?, ?>) value).entrySet()) {
-                object.put((String) entry.getKey(), json_from(entry.getValue()));
+                // Null must stay a key so re-served signatures still verify.
+                Object item = entry.getValue();
+                object.put((String) entry.getKey(),
+                    item == null ? JSONObject.NULL : json_from(item));
             }
             return object;
         }
@@ -959,20 +977,20 @@ public class MainActivity extends Activity {
             feed_sync.setEnabled(live);
             StringBuilder posts = new StringBuilder();
             if (active != null) {
-                java.util.Set<String> edited = active.feed_posts.editedIds();
-                for (java.util.Map<String, Object> post
-                        : active.feed_posts.displayPage(FeedRules.CACHE_BOUND)) {
+                FeedRules.FeedCache.DisplaySnapshot snapshot =
+                    active.feed_posts.displaySnapshot(FeedRules.CACHE_BOUND);
+                for (java.util.Map<String, Object> post : snapshot.posts) {
                     String author = (String) post.get("author_id");
                     String label = peer_id.equals(author) ? "phone post" : author;
                     if (peer != null && peer.peer_id.equals(author)) label = peer.name;
                     posts.append(label).append(" | ");
                     if (post.containsKey("tombstone")) {
-                        posts.append(getString(active.feed_posts.stateOf(
-                                (String) post.get("post_id")) == PostSignatures.State.SIGNED
+                        posts.append(getString(snapshot.states.get(post.get("post_id"))
+                                == PostSignatures.State.SIGNED
                             ? R.string.feed_deleted : R.string.feed_unverified_deletion));
                     } else {
                         posts.append(post.get("text"));
-                        if (edited.contains(post.get("post_id"))) {
+                        if (snapshot.edited.contains(post.get("post_id"))) {
                             posts.append(getString(R.string.feed_edited_marker));
                         }
                     }

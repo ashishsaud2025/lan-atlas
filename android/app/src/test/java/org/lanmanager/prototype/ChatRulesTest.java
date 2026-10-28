@@ -15,6 +15,14 @@ public final class ChatRulesTest {
         assertFalse(ChatRules.validText("x".repeat(2001)));
     }
 
+    @Test public void incoming_text_rejects_blank_on_all_supported_levels() {
+        assertTrue(ChatRules.validIncomingText("hi"));
+        assertFalse(ChatRules.validIncomingText("   "));
+        assertFalse(ChatRules.validIncomingText("\u00a0"));
+        assertFalse(ChatRules.validIncomingText(null));
+        assertFalse(ChatRules.validIncomingText("x".repeat(4097)));
+    }
+
     @Test public void require_text_rejects_without_stripping() {
         assertEquals("  hi  ", ChatRules.requireText("  hi  "));
         try {

@@ -139,11 +139,12 @@ public final class PostSignatures {
             return;
         }
         Object rawName = ref.get("name");
-        if (!(rawName instanceof String) || ((String) rawName).trim().isEmpty()) {
+        if (!(rawName instanceof String) || FeedRules.blank((String) rawName)) {
             throw new IllegalArgumentException("invalid file reference name");
         }
         String name = (String) rawName;
-        if (name.length() > MAX_REF_NAME || ".".equals(name) || "..".equals(name)
+        if (name.codePointCount(0, name.length()) > MAX_REF_NAME
+                || ".".equals(name) || "..".equals(name)
                 || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf(':') >= 0
                 || name.codePoints().anyMatch(character -> character < 32)) {
             throw new IllegalArgumentException("invalid file reference name");

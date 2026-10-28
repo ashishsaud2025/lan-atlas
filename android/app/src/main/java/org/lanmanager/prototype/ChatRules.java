@@ -26,8 +26,9 @@ public final class ChatRules {
     }
 
     public static boolean validIncomingText(String value) {
-        if (value == null || value.isBlank() || value.length() > MAX_INCOMING_TEXT) return false;
-        return true;
+        if (value == null || value.length() > MAX_INCOMING_TEXT) return false;
+        return !value.codePoints().allMatch(character ->
+            Character.isWhitespace(character) || Character.isSpaceChar(character));
     }
 
     public static boolean acceptableDm(String toSession, String localSession) {

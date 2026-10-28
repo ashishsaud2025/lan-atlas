@@ -1,6 +1,7 @@
 package org.lanmanager.prototype;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 
@@ -73,6 +74,30 @@ public final class PostSignaturesTest {
     @SuppressWarnings("unchecked")
     private static Map<String, Object> asMap(Object value) {
         return (Map<String, Object>) value;
+    }
+
+    @Test public void ref_name_counts_code_points() {
+        Map<String, Object> post = PostFixtures.unsigned(fixture, "unsigned");
+        Map<String, Object> ref = new java.util.LinkedHashMap<>();
+        ref.put("kind", "file");
+        ref.put("name", "\ud83d\ude00".repeat(200));
+        ref.put("size", 1L);
+        post.put("refs", new java.util.ArrayList<>(java.util.Arrays.asList(ref)));
+        PostSignatures.validate(post);
+    }
+
+    @Test public void ref_name_rejects_unicode_whitespace() {
+        Map<String, Object> post = PostFixtures.unsigned(fixture, "unsigned");
+        Map<String, Object> ref = new java.util.LinkedHashMap<>();
+        ref.put("kind", "file");
+        ref.put("name", "\u00a0");
+        ref.put("size", 1L);
+        post.put("refs", new java.util.ArrayList<>(java.util.Arrays.asList(ref)));
+        try {
+            PostSignatures.validate(post);
+            assertFalse("blank name must throw", true);
+        } catch (IllegalArgumentException expected) {
+        }
     }
 
     @Test public void foreign_author_tombstone_is_still_signed() {

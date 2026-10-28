@@ -16,15 +16,16 @@ public final class FeedRules {
     public static final int MAX_TEXT = 4096;
     public static final int PAGE_LIMIT = 50;
     public static final int CACHE_BOUND = 200;
-    // 16 worst-case signed posts stay below the 1 MiB frame even with escaped text.
+    // Desktop reserves the same 4096 bytes of envelope headroom.
+    static final long SERVE_BYTE_BUDGET = 1048576L - 4096L;
     private static final int SERVE_PAGE_LIMIT = 16;
 
     private FeedRules() {}
 
     public static boolean validText(String value) {
         if (value == null || value.length() > MAX_TEXT) return false;
-        return !value.codePoints().allMatch(character ->
-            Character.isWhitespace(character) || Character.isSpaceChar(character));
+        if (unpairedSurrogate(value)) return false;
+        return !blank(value);
     }
 
     public static boolean validUuid(String value) {
@@ -46,15 +47,39 @@ public final class FeedRules {
         return sortKey(author, post).compareTo(sortKey(lastAuthor, lastPost)) > 0;
     }
 
+    /** Code point whitespace test that keeps API 26 to 32 working. */
+    public static boolean blank(String value) {
+        return value.codePoints().allMatch(character ->
+            Character.isWhitespace(character) || Character.isSpaceChar(character));
+    }
+
+    private static boolean unpairedSurrogate(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (Character.isHighSurrogate(character)) {
+                if (index + 1 >= value.length()
+                        || !Character.isLowSurrogate(value.charAt(index + 1))) return true;
+                index++;
+            } else if (Character.isLowSurrogate(character)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Bounded memory post cache keyed by post ID with stable ordering. */
     public static final class FeedCache {
         private final Map<String, Map<String, Object>> posts = new LinkedHashMap<>();
         private final Map<String, PostSignatures.State> states = new HashMap<>();
 
+        public synchronized int size() {
+            return posts.size();
+        }
+
         public synchronized int putValidated(String id, String author, String text,
                                              long createdMs) {
             if (!validUuid(id) || !validUuid(author) || !validText(text)) return 0;
-            if (posts.containsKey(id)) return 0;
+            if (createdMs < 0 || posts.containsKey(id)) return 0;
             Map<String, Object> post = new LinkedHashMap<>();
             post.put("post_id", id);
             post.put("author_id", author);
@@ -64,6 +89,7 @@ public final class FeedRules {
             PostSignatures.validate(post);
             posts.put(id, post);
             states.put(id, PostSignatures.State.UNSIGNED);
+            trim();
             return 1;
         }
 
@@ -75,9 +101,9 @@ public final class FeedRules {
                 PostSignatures.Verification verification = PostSignatures.verify(raw);
                 if (verification.state == PostSignatures.State.INVALID) {
                     throw new IllegalArgumentException(
-                        "Invalid signed post: " + verification.reason);
+                        "Invalid post: " + verification.reason);
                 }
-                verified.add(raw);
+                verified.add(copyOf(raw));
                 verifiedStates.add(verification.state);
             }
             synchronized (this) {
@@ -97,11 +123,7 @@ public final class FeedRules {
                     posts.put(id, post);
                     states.put(id, stagedStates.get(index));
                 }
-                while (posts.size() > CACHE_BOUND) {
-                    String eldest = posts.keySet().iterator().next();
-                    posts.remove(eldest);
-                    states.remove(eldest);
-                }
+                trim();
                 return staged.size();
             }
         }
@@ -156,13 +178,32 @@ public final class FeedRules {
             }
         }
 
+        /** Visible rows with their moderation evidence from one consistent read. */
+        public static final class DisplaySnapshot {
+            public final List<Map<String, Object>> posts;
+            public final Set<String> edited;
+            public final Map<String, PostSignatures.State> states;
+
+            DisplaySnapshot(List<Map<String, Object>> posts, Set<String> edited,
+                            Map<String, PostSignatures.State> states) {
+                this.posts = posts;
+                this.edited = edited;
+                this.states = states;
+            }
+        }
+
         /** Serve a page for peers: tombstones travel, hidden targets do not. */
         public synchronized FeedPage servePage(int limit, Map<String, Object> cursor,
                                                String author) {
+            return servePage(limit, cursor, author, SERVE_BYTE_BUDGET);
+        }
+
+        synchronized FeedPage servePage(int limit, Map<String, Object> cursor, String author,
+                                        long byteBudget) {
             String lastAuthor = cursor == null ? null : (String) cursor.get("last_author");
             String lastPost = cursor == null ? null : (String) cursor.get("last_post");
             Set<String> hidden = hiddenIds();
-            List<Map<String, Object>> matching = new ArrayList<>();
+            List<Map<String, Object>> candidates = new ArrayList<>();
             for (Map<String, Object> post : sorted()) {
                 if (author != null && !author.equals(post.get("author_id"))) continue;
                 if (!afterCursor(lastAuthor, lastPost,
@@ -170,15 +211,27 @@ public final class FeedRules {
                     continue;
                 }
                 if (hidden.contains(post.get("post_id"))) continue;
-                matching.add(Collections.unmodifiableMap(post));
+                candidates.add(Collections.unmodifiableMap(post));
             }
             int count = Math.min(Math.max(limit, 1), SERVE_PAGE_LIMIT);
-            boolean complete = matching.size() <= count;
-            return new FeedPage(matching.subList(0, Math.min(count, matching.size())), complete);
+            int taken = 0;
+            long used = 0;
+            while (taken < candidates.size() && taken < count) {
+                long size = estimateBytes(candidates.get(taken));
+                // Always advance at least one post so a page can never stall.
+                if (taken > 0 && used + size > byteBudget) break;
+                used += size;
+                taken++;
+            }
+            return new FeedPage(candidates.subList(0, taken), taken == candidates.size());
         }
 
         /** Visible rows for this device, including deletion evidence tombstones. */
         public synchronized List<Map<String, Object>> displayPage(int limit) {
+            return displaySnapshot(limit).posts;
+        }
+
+        public synchronized DisplaySnapshot displaySnapshot(int limit) {
             Set<String> hidden = hiddenIds();
             List<Map<String, Object>> page = new ArrayList<>();
             int count = Math.min(Math.max(limit, 1), CACHE_BOUND);
@@ -187,7 +240,20 @@ public final class FeedRules {
                 if (hidden.contains(post.get("post_id"))) continue;
                 page.add(Collections.unmodifiableMap(post));
             }
-            return page;
+            Map<String, PostSignatures.State> pageStates = new HashMap<>();
+            for (Map<String, Object> post : page) {
+                String id = (String) post.get("post_id");
+                pageStates.put(id, stateOf(id));
+            }
+            return new DisplaySnapshot(page, editedIds(), pageStates);
+        }
+
+        private void trim() {
+            while (posts.size() > CACHE_BOUND) {
+                String eldest = posts.keySet().iterator().next();
+                posts.remove(eldest);
+                states.remove(eldest);
+            }
         }
 
         private List<Map<String, Object>> sorted() {
@@ -204,5 +270,73 @@ public final class FeedRules {
             Map<String, Object> tombstone = (Map<String, Object>) value;
             return tombstone;
         }
+    }
+
+    /** Worst-case UTF-8 JSON size used to keep POST_PAGE inside one frame. */
+    static long estimateBytes(Object value) {
+        if (value == null) return 4;
+        if (value instanceof String) return quotedBytes((String) value);
+        if (value instanceof Boolean) return 5;
+        if (value instanceof Number) return 20;
+        if (value instanceof Map) {
+            long total = 2;
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                total += quotedBytes(String.valueOf(entry.getKey())) + 1
+                    + estimateBytes(entry.getValue()) + 1;
+            }
+            return total;
+        }
+        if (value instanceof List) {
+            long total = 2;
+            for (Object item : (List<?>) value) total += estimateBytes(item) + 1;
+            return total;
+        }
+        return 32;
+    }
+
+    private static long quotedBytes(String value) {
+        long total = 2;
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (character == '"' || character == '\\') {
+                total += 2;
+            } else if (character < 0x20) {
+                total += 6;
+            } else if (character < 0x80) {
+                total += 1;
+            } else if (character < 0x800) {
+                total += 2;
+            } else if (Character.isHighSurrogate(character)) {
+                total += 4;
+                index++;
+            } else {
+                total += 3;
+            }
+        }
+        return total;
+    }
+
+    private static Map<String, Object> copyOf(Map<String, Object> post) {
+        Map<String, Object> copy = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : post.entrySet()) {
+            copy.put(entry.getKey(), copyValue(entry.getValue()));
+        }
+        return copy;
+    }
+
+    private static Object copyValue(Object value) {
+        if (value instanceof Map) {
+            Map<String, Object> copy = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                copy.put((String) entry.getKey(), copyValue(entry.getValue()));
+            }
+            return copy;
+        }
+        if (value instanceof List) {
+            List<Object> copy = new ArrayList<>();
+            for (Object item : (List<?>) value) copy.add(copyValue(item));
+            return copy;
+        }
+        return value;
     }
 }

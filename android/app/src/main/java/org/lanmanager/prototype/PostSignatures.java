@@ -66,6 +66,9 @@ public final class PostSignatures {
             CertificateFactory factory = CertificateFactory.getInstance("X.509");
             X509Certificate certificate = (X509Certificate) factory.generateCertificate(
                 new ByteArrayInputStream(certificateDer));
+            if (!java.util.Arrays.equals(certificate.getEncoded(), certificateDer)) {
+                throw new IllegalArgumentException("post certificate has trailing data");
+            }
             fingerprint = sha256Hex(certificateDer);
             PublicKey key = certificate.getPublicKey();
             if (!(key instanceof ECPublicKey)) {
@@ -300,7 +303,7 @@ public final class PostSignatures {
         return raw;
     }
 
-    private static byte[] signingPayload(Map<String, Object> post) {
+    static byte[] signingPayload(Map<String, Object> post) {
         Map<String, Object> fields = new TreeMap<>();
         fields.put("post_id", post.get("post_id"));
         fields.put("author_id", post.get("author_id"));
@@ -391,7 +394,7 @@ public final class PostSignatures {
         out.append('"');
     }
 
-    private static boolean isP256(ECParameterSpec actual) {
+    static boolean isP256(ECParameterSpec actual) {
         try {
             AlgorithmParameters parameters = AlgorithmParameters.getInstance("EC");
             parameters.init(new ECGenParameterSpec("secp256r1"));

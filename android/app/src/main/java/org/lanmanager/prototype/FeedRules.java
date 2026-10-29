@@ -71,6 +71,7 @@ public final class FeedRules {
     public static final class FeedCache {
         private final Map<String, Map<String, Object>> posts = new LinkedHashMap<>();
         private final Map<String, PostSignatures.State> states = new HashMap<>();
+        private final Map<String, String> fingerprints = new HashMap<>();
 
         public synchronized int size() {
             return posts.size();
@@ -89,6 +90,7 @@ public final class FeedRules {
             PostSignatures.validate(post);
             posts.put(id, post);
             states.put(id, PostSignatures.State.UNSIGNED);
+            fingerprints.remove(id);
             trim();
             return 1;
         }
@@ -97,6 +99,7 @@ public final class FeedRules {
         public int mergeInto(List<Map<String, Object>> page) {
             List<Map<String, Object>> verified = new ArrayList<>();
             List<PostSignatures.State> verifiedStates = new ArrayList<>();
+            List<String> verifiedFingerprints = new ArrayList<>();
             for (Map<String, Object> raw : page) {
                 PostSignatures.Verification verification = PostSignatures.verify(raw);
                 if (verification.state == PostSignatures.State.INVALID) {
@@ -105,10 +108,12 @@ public final class FeedRules {
                 }
                 verified.add(copyOf(raw));
                 verifiedStates.add(verification.state);
+                verifiedFingerprints.add(verification.fingerprint);
             }
             synchronized (this) {
                 List<Map<String, Object>> staged = new ArrayList<>();
                 List<PostSignatures.State> stagedStates = new ArrayList<>();
+                List<String> stagedFingerprints = new ArrayList<>();
                 Set<String> stagedIds = new HashSet<>();
                 for (int index = 0; index < verified.size(); index++) {
                     Map<String, Object> post = verified.get(index);
@@ -116,16 +121,28 @@ public final class FeedRules {
                     if (posts.containsKey(id) || !stagedIds.add(id)) continue;
                     staged.add(post);
                     stagedStates.add(verifiedStates.get(index));
+                    stagedFingerprints.add(verifiedFingerprints.get(index));
                 }
                 for (int index = 0; index < staged.size(); index++) {
                     Map<String, Object> post = staged.get(index);
                     String id = (String) post.get("post_id");
                     posts.put(id, post);
                     states.put(id, stagedStates.get(index));
+                    if (stagedFingerprints.get(index) == null) {
+                        fingerprints.remove(id);
+                    } else {
+                        fingerprints.put(id, stagedFingerprints.get(index));
+                    }
                 }
                 trim();
                 return staged.size();
             }
+        }
+
+        /** Deep copy of one cached post, or null when it is not stored. */
+        public synchronized Map<String, Object> get(String postId) {
+            Map<String, Object> post = posts.get(postId);
+            return post == null ? null : copyOf(post);
         }
 
         /** Verification state cached with the post, if it is still present. */
@@ -183,12 +200,15 @@ public final class FeedRules {
             public final List<Map<String, Object>> posts;
             public final Set<String> edited;
             public final Map<String, PostSignatures.State> states;
+            public final Map<String, String> fingerprints;
 
             DisplaySnapshot(List<Map<String, Object>> posts, Set<String> edited,
-                            Map<String, PostSignatures.State> states) {
+                            Map<String, PostSignatures.State> states,
+                            Map<String, String> fingerprints) {
                 this.posts = posts;
                 this.edited = edited;
                 this.states = states;
+                this.fingerprints = fingerprints;
             }
         }
 
@@ -241,11 +261,14 @@ public final class FeedRules {
                 page.add(Collections.unmodifiableMap(post));
             }
             Map<String, PostSignatures.State> pageStates = new HashMap<>();
+            Map<String, String> pageFingerprints = new HashMap<>();
             for (Map<String, Object> post : page) {
                 String id = (String) post.get("post_id");
                 pageStates.put(id, stateOf(id));
+                String fingerprint = fingerprints.get(id);
+                if (fingerprint != null) pageFingerprints.put(id, fingerprint);
             }
-            return new DisplaySnapshot(page, editedIds(), pageStates);
+            return new DisplaySnapshot(page, editedIds(), pageStates, pageFingerprints);
         }
 
         private void trim() {
@@ -253,6 +276,7 @@ public final class FeedRules {
                 String eldest = posts.keySet().iterator().next();
                 posts.remove(eldest);
                 states.remove(eldest);
+                fingerprints.remove(eldest);
             }
         }
 

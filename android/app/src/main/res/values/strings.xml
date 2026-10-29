@@ -104,7 +104,7 @@
     <string name="chat_unaccepted">No acceptance from %1$s · marked uncertain</string>
     <string name="feed">Feed</string>
     <string name="feed_title">Local and cached posts</string>
-    <string name="feed_subtitle">Sync posts from a selected session advertising posts_v1. Signed posts are verified; phone posts stay unsigned.</string>
+    <string name="feed_subtitle">Sync posts from a selected session advertising posts_v1. Signed posts are verified and phone posts are signed by this device.</string>
     <string name="feed_sync">Sync selected session</string>
     <string name="feed_hint">Post up to 4096 characters</string>
     <string name="feed_publish">Publish phone post</string>
@@ -114,8 +114,18 @@
     <string name="feed_edited_marker"> [edited]</string>
     <string name="feed_invalid_text">Post must contain 1 to 4096 characters</string>
     <string name="feed_no_peer">Select a session advertising posts_v1 first</string>
+    <string name="feed_no_session">Start the session first</string>
     <string name="feed_synced">Feed sync · new %1$d · known %2$d</string>
     <string name="feed_failed">Feed sync failed: %1$s</string>
+    <string name="feed_own_label">Your signed posts</string>
+    <string name="feed_delete">Delete selected</string>
+    <string name="feed_edit">Edit selected with composer text</string>
+    <string name="feed_no_own_posts">No signed phone posts yet</string>
+    <string name="feed_no_identity">Phone signing identity unavailable</string>
+    <string name="feed_deleted_local">Deleted your post</string>
+    <string name="feed_edited_local">Edited your post</string>
+    <string name="feed_action_failed">Post action failed: %1$s</string>
+    <string name="feed_no_selection">Select one of your posts first</string>
     <string name="transfer_sent">Verified by receiver · %1$s</string>
     <string name="transfer_received">Verified and saved · %1$s</string>
     <string name="transfer_progress">%1$s · %2$d / %3$d bytes</string>

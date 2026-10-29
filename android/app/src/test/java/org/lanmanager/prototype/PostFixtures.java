@@ -14,14 +14,17 @@ final class PostFixtures {
     private PostFixtures() {}
 
     static Properties load() {
+        return load("post-moderation-v1.properties");
+    }
+
+    static Properties load(String name) {
         Properties properties = new Properties();
-        try (InputStream stream = PostFixtures.class.getResourceAsStream(
-                "/post-moderation-v1.properties")) {
-            if (stream == null) throw new IllegalStateException("fixture missing");
+        try (InputStream stream = PostFixtures.class.getResourceAsStream("/" + name)) {
+            if (stream == null) throw new IllegalStateException("fixture missing: " + name);
             properties.load(stream);
             return properties;
         } catch (IOException error) {
-            throw new IllegalStateException("fixture unreadable", error);
+            throw new IllegalStateException("fixture unreadable: " + name, error);
         }
     }
 

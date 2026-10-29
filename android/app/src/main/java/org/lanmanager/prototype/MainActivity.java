@@ -17,10 +17,13 @@ import android.util.JsonToken;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -28,6 +31,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.File;
 import java.io.FileInputStream;
@@ -112,6 +116,13 @@ public class MainActivity extends Activity {
     private EditText feed_input;
     private Button feed_sync;
     private Button feed_publish;
+    private Spinner feed_own;
+    private Button feed_delete;
+    private Button feed_edit;
+    private PostIdentity post_identity;
+    private String post_fingerprint;
+    private final List<String> own_ids = new ArrayList<>();
+    private String selected_own_id;
     private boolean chat_dm;
     private LinearLayout device_list;
     private ObservedTopologyView topology_view;
@@ -220,6 +231,7 @@ public class MainActivity extends Activity {
         }
         bind_views();
         setup_navigation();
+        load_post_identity();
         findViewById(R.id.start_button).setOnClickListener(view -> start_session());
         findViewById(R.id.stop_button).setOnClickListener(view -> stop_session());
         probe_button.setOnClickListener(view -> probe());
@@ -228,6 +240,18 @@ public class MainActivity extends Activity {
         chat_send.setOnClickListener(view -> send_chat_from_composer());
         feed_sync.setOnClickListener(view -> sync_feed_from_page());
         feed_publish.setOnClickListener(view -> publish_feed_from_composer());
+        feed_delete.setOnClickListener(view -> delete_own_post());
+        feed_edit.setOnClickListener(view -> edit_own_post());
+        feed_own.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view,
+                                                 int position, long id) {
+                selected_own_id = position < own_ids.size() ? own_ids.get(position) : null;
+            }
+
+            @Override public void onNothingSelected(AdapterView<?> parent) {
+                selected_own_id = null;
+            }
+        });
         send_file_button.setOnClickListener(view -> choose_file_to_send());
         accept_file_button.setOnClickListener(view -> accept_incoming_file());
         decline_file_button.setOnClickListener(view -> decline_incoming_file());
@@ -240,6 +264,55 @@ public class MainActivity extends Activity {
         show_page(selected_page);
         update_session_ui(null);
         update_roster_ui(null, Collections.emptyList());
+        update_feed_ui(null);
+    }
+
+    /** Load the persistent signing key, or fail closed when the stored key is unusable. */
+    private void load_post_identity() {
+        File file = new File(getFilesDir(), "post-identity.bin");
+        if (!file.isFile()) {
+            try {
+                post_identity = PostIdentity.generate(peer_id);
+                store_post_identity(file, post_identity.encode());
+            } catch (Exception error) {
+                post_identity = null;
+                Log.w(TAG, "Could not create the post signing identity", error);
+            }
+        } else {
+            try {
+                post_identity = PostIdentity.decode(read_file(file), peer_id);
+            } catch (Exception error) {
+                post_identity = null;
+                Log.w(TAG, "Could not load the post signing identity", error);
+            }
+        }
+        post_fingerprint = post_identity == null ? null : post_identity.fingerprint();
+        if (post_identity == null) report(null, getString(R.string.feed_no_identity));
+    }
+
+    private static void store_post_identity(File file, byte[] blob) throws IOException {
+        File temporary = new File(file.getParentFile(), file.getName() + ".tmp");
+        try (FileOutputStream output = new FileOutputStream(temporary)) {
+            output.write(blob);
+            output.getFD().sync();
+        }
+        if (!temporary.renameTo(file)) {
+            // Leaving the old state alone keeps a mismatched key from being silently replaced.
+            temporary.delete();
+            throw new IOException("cannot store the post signing identity");
+        }
+    }
+
+    private static byte[] read_file(File file) throws IOException {
+        try (InputStream input = new FileInputStream(file)) {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) >= 0) {
+                output.write(buffer, 0, count);
+            }
+            return output.toByteArray();
+        }
     }
 
     private void bind_views() {
@@ -270,6 +343,9 @@ public class MainActivity extends Activity {
         feed_input = findViewById(R.id.feed_input);
         feed_sync = findViewById(R.id.feed_sync);
         feed_publish = findViewById(R.id.feed_publish);
+        feed_own = findViewById(R.id.feed_own);
+        feed_delete = findViewById(R.id.feed_delete);
+        feed_edit = findViewById(R.id.feed_edit);
         device_list = findViewById(R.id.device_list);
         topology_view = findViewById(R.id.topology_view);
         transfer_progress = findViewById(R.id.transfer_progress);
@@ -321,6 +397,12 @@ public class MainActivity extends Activity {
             }
             log_view.setText(log_buffer.toString());
         });
+    }
+
+    private static String describe_error(Throwable error) {
+        String message = error.getMessage();
+        return message == null || message.isEmpty()
+            ? error.getClass().getSimpleName() : message;
     }
 
     private void start_session() {
@@ -975,31 +1057,76 @@ public class MainActivity extends Activity {
                     peer.name, peer.ip, peer.tcp_port));
             }
             feed_sync.setEnabled(live);
+            FeedRules.FeedCache.DisplaySnapshot snapshot = active == null
+                ? new FeedRules.FeedCache.DisplaySnapshot(java.util.Collections.emptyList(),
+                    java.util.Collections.emptySet(), java.util.Collections.emptyMap(),
+                    java.util.Collections.emptyMap())
+                : active.feed_posts.displaySnapshot(FeedRules.CACHE_BOUND);
             StringBuilder posts = new StringBuilder();
-            if (active != null) {
-                FeedRules.FeedCache.DisplaySnapshot snapshot =
-                    active.feed_posts.displaySnapshot(FeedRules.CACHE_BOUND);
-                for (java.util.Map<String, Object> post : snapshot.posts) {
-                    String author = (String) post.get("author_id");
-                    String label = peer_id.equals(author) ? "phone post" : author;
-                    if (peer != null && peer.peer_id.equals(author)) label = peer.name;
-                    posts.append(label).append(" | ");
-                    if (post.containsKey("tombstone")) {
-                        posts.append(getString(snapshot.states.get(post.get("post_id"))
-                                == PostSignatures.State.SIGNED
-                            ? R.string.feed_deleted : R.string.feed_unverified_deletion));
-                    } else {
-                        posts.append(post.get("text"));
-                        if (snapshot.edited.contains(post.get("post_id"))) {
-                            posts.append(getString(R.string.feed_edited_marker));
-                        }
+            for (java.util.Map<String, Object> post : snapshot.posts) {
+                String author = (String) post.get("author_id");
+                String label = peer_id.equals(author) ? "phone post" : author;
+                if (peer != null && peer.peer_id.equals(author)) label = peer.name;
+                posts.append(label).append(" | ");
+                if (post.containsKey("tombstone")) {
+                    posts.append(getString(snapshot.states.get(post.get("post_id"))
+                            == PostSignatures.State.SIGNED
+                        ? R.string.feed_deleted : R.string.feed_unverified_deletion));
+                } else {
+                    posts.append(post.get("text"));
+                    if (snapshot.edited.contains(post.get("post_id"))) {
+                        posts.append(getString(R.string.feed_edited_marker));
                     }
-                    posts.append('\n');
                 }
+                posts.append('\n');
             }
             feed_list.setText(posts.length() == 0
                 ? getString(R.string.feed_empty) : posts.toString());
+            update_own_post_controls(snapshot, active != null && active.running);
         });
+    }
+
+    /** Offer only own posts signed by this device, which are the only changeable ones. */
+    private void update_own_post_controls(FeedRules.FeedCache.DisplaySnapshot snapshot,
+                                          boolean running) {
+        List<String> ids = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
+        for (Map<String, Object> post : snapshot.posts) {
+            if (ids.size() >= FeedRules.PAGE_LIMIT) break;
+            if (!PostActions.can_moderate(post, peer_id, post_fingerprint,
+                    snapshot.states.get(post.get("post_id")),
+                    snapshot.fingerprints.get(post.get("post_id")))) continue;
+            ids.add((String) post.get("post_id"));
+            labels.add(feed_label(post));
+        }
+        boolean changed = !ids.equals(own_ids);
+        own_ids.clear();
+        own_ids.addAll(ids);
+        if (labels.isEmpty()) {
+            labels.add(getString(post_identity == null
+                ? R.string.feed_no_identity : R.string.feed_no_own_posts));
+        }
+        // The roster refresh runs every two seconds, so keep an open dropdown stable.
+        if (changed || feed_own.getAdapter() == null) {
+            feed_own.setAdapter(new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, labels));
+        }
+        if (selected_own_id == null || !own_ids.contains(selected_own_id)) {
+            selected_own_id = own_ids.isEmpty() ? null : own_ids.get(0);
+        }
+        feed_own.setSelection(own_ids.isEmpty() ? 0 : own_ids.indexOf(selected_own_id),
+            false);
+        boolean may_change = running && post_identity != null && !own_ids.isEmpty();
+        feed_delete.setEnabled(may_change);
+        feed_edit.setEnabled(may_change);
+    }
+
+    private static String feed_label(java.util.Map<String, Object> post) {
+        String text = String.valueOf(post.get("text")).replace('\n', ' ');
+        if (text.codePointCount(0, text.length()) > 60) {
+            text = text.substring(0, text.offsetByCodePoints(0, 60)) + "...";
+        }
+        return text + " | " + ((String) post.get("post_id")).substring(0, 8);
     }
 
     private void sync_feed_from_page() {
@@ -1016,7 +1143,7 @@ public class MainActivity extends Activity {
     private void publish_feed_from_composer() {
         Session session = current;
         if (session == null || !session.running) {
-            report(session, getString(R.string.feed_no_peer));
+            report(session, getString(R.string.feed_no_session));
             return;
         }
         String text = feed_input.getText().toString();
@@ -1024,10 +1151,87 @@ public class MainActivity extends Activity {
             feed_input.setError(getString(R.string.feed_invalid_text));
             return;
         }
+        if (post_identity == null) {
+            feed_input.setError(getString(R.string.feed_no_identity));
+            return;
+        }
+        Map<String, Object> post;
+        try {
+            post = post_identity.sign(
+                PostActions.new_post(peer_id, text, System.currentTimeMillis()));
+            session.feed_posts.mergeInto(Collections.singletonList(post));
+        } catch (RuntimeException error) {
+            feed_input.setError(getString(R.string.feed_action_failed,
+                describe_error(error)));
+            return;
+        }
         feed_input.setError(null);
         feed_input.setText("");
-        session.feed_posts.putValidated(UUID.randomUUID().toString(), peer_id,
-            text, System.currentTimeMillis());
+        update_feed_ui(session);
+    }
+
+    private void delete_own_post() {
+        Session session = current;
+        if (session == null || !session.running) {
+            report(session, getString(R.string.feed_no_session));
+            return;
+        }
+        if (post_identity == null) {
+            report(session, getString(R.string.feed_no_identity));
+            return;
+        }
+        Map<String, Object> target = selected_own_id == null
+            ? null : session.feed_posts.get(selected_own_id);
+        if (target == null) {
+            report(session, getString(R.string.feed_no_selection));
+            update_feed_ui(session);
+            return;
+        }
+        try {
+            Map<String, Object> tombstone = PostActions.delete(
+                post_identity, target, System.currentTimeMillis());
+            session.feed_posts.mergeInto(Collections.singletonList(tombstone));
+            selected_own_id = null;
+            report(session, getString(R.string.feed_deleted_local));
+        } catch (RuntimeException error) {
+            report(session, getString(R.string.feed_action_failed, describe_error(error)));
+        }
+        update_feed_ui(session);
+    }
+
+    private void edit_own_post() {
+        Session session = current;
+        if (session == null || !session.running) {
+            report(session, getString(R.string.feed_no_session));
+            return;
+        }
+        if (post_identity == null) {
+            report(session, getString(R.string.feed_no_identity));
+            return;
+        }
+        String text = feed_input.getText().toString();
+        if (!FeedRules.validText(text)) {
+            feed_input.setError(getString(R.string.feed_invalid_text));
+            return;
+        }
+        Map<String, Object> target = selected_own_id == null
+            ? null : session.feed_posts.get(selected_own_id);
+        if (target == null) {
+            feed_input.setError(getString(R.string.feed_no_selection));
+            return;
+        }
+        try {
+            List<Map<String, Object>> pair = PostActions.edit(
+                post_identity, target, text, System.currentTimeMillis());
+            session.feed_posts.mergeInto(pair);
+            feed_input.setError(null);
+            feed_input.setText("");
+            selected_own_id = (String) pair.get(0).get("post_id");
+            report(session, getString(R.string.feed_edited_local));
+        } catch (RuntimeException error) {
+            feed_input.setError(getString(R.string.feed_action_failed,
+                describe_error(error)));
+        }
         update_feed_ui(session);
     }
 

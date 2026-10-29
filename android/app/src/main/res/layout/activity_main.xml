@@ -349,6 +349,23 @@
                         android:layout_width="match_parent" android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
                         android:text="@string/feed_publish" />
+                    <TextView style="@style/Widget.LanAtlas.Label"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp" android:text="@string/feed_own_label" />
+                    <Spinner android:id="@+id/feed_own"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp" />
+                    <LinearLayout android:layout_width="match_parent"
+                        android:layout_height="wrap_content" android:orientation="horizontal">
+                        <Button android:id="@+id/feed_delete" style="@style/Widget.LanAtlas.Button"
+                            android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_weight="1" android:enabled="false"
+                            android:text="@string/feed_delete" />
+                        <Button android:id="@+id/feed_edit" style="@style/Widget.LanAtlas.Button"
+                            android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp" android:layout_weight="1"
+                            android:enabled="false" android:text="@string/feed_edit" />
+                    </LinearLayout>
                 </LinearLayout>
             </LinearLayout>
         </ScrollView>
